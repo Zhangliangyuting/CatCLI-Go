@@ -70,7 +70,7 @@ export CATCLI_OPENAI_COMPATIBLE_BASE_URL=https://api.deepseek.com
 export CATCLI_OPENAI_COMPATIBLE_MODEL=deepseek-v4-pro
 ```
 
-  For a minimal local setup, use `config/config.yaml` for tool and agent defaults, and `.env` for API credentials.
+For a minimal local setup, use `config/config.yaml` for tool and agent defaults, and `.env` for API credentials.
 
 ## Run
 
