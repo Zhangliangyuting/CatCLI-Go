@@ -1,0 +1,20 @@
+openai_compatible:
+  api_key: your-api-key
+  base_url: https://api.deepseek.com
+  model: deepseek-v4-pro
+
+agent:
+  max_steps: 8
+
+providers:
+  enabled:
+    - builtin
+
+tools:
+  enabled:
+    - list_dir
+    - read_file
+    - edit_file
+    - execute_command
+    - write_file
+    - create_project
