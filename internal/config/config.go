@@ -13,7 +13,6 @@ import (
 type Config struct {
 	ConfigFile       string                 `mapstructure:"-"`
 	OpenAICompatible OpenAICompatibleConfig `mapstructure:"openai_compatible"`
-	Agent            AgentConfig            `mapstructure:"agent"`
 	Providers        ProvidersConfig        `mapstructure:"providers"`
 	Tools            ToolsConfig            `mapstructure:"tools"`
 }
@@ -22,10 +21,6 @@ type OpenAICompatibleConfig struct {
 	APIKey  string `mapstructure:"api_key"`
 	BaseURL string `mapstructure:"base_url"`
 	Model   string `mapstructure:"model"`
-}
-
-type AgentConfig struct {
-	MaxSteps int `mapstructure:"max_steps"`
 }
 
 type ProvidersConfig struct {
@@ -97,9 +92,6 @@ func defaultConfig() Config {
 			BaseURL: "https://open.bigmodel.cn/api/paas/v4",
 			Model:   "glm-5.1",
 		},
-		Agent: AgentConfig{
-			MaxSteps: 8,
-		},
 		Providers: ProvidersConfig{
 			Enabled: []string{"builtin"},
 		},
@@ -116,7 +108,6 @@ func defaultConfig() Config {
 func setDefaults(v *viper.Viper, cfg Config) {
 	v.SetDefault("openai_compatible.base_url", cfg.OpenAICompatible.BaseURL)
 	v.SetDefault("openai_compatible.model", cfg.OpenAICompatible.Model)
-	v.SetDefault("agent.max_steps", cfg.Agent.MaxSteps)
 	v.SetDefault("tools.enabled", cfg.Tools.Enabled)
 	v.SetDefault("providers.enabled", cfg.Providers.Enabled)
 }
@@ -125,9 +116,5 @@ func (c Config) validate() error {
 	if c.OpenAICompatible.APIKey == "" {
 		return errors.New("openai_compatible.api_key is required")
 	}
-	if c.Agent.MaxSteps <= 0 {
-		return errors.New("agent.max_steps must be positive")
-	}
-
 	return nil
 }

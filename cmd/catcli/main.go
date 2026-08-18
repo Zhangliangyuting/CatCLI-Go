@@ -4,6 +4,7 @@ import (
 	"AgentCLI/internal/agent"
 	"AgentCLI/internal/config"
 	"AgentCLI/internal/llm"
+	"AgentCLI/internal/plan"
 	"AgentCLI/internal/tool"
 	"bufio"
 	"fmt"
@@ -58,7 +59,18 @@ func main() {
 	}
 
 	// 创建 Agent
-	agentInstance := agent.NewAgent(client, toolRegistry, cfg.Agent.MaxSteps)
+	agentInstance := agent.NewReActAgent(client, toolRegistry)
+
+	planner := plan.NewLLMPlanGenerator(client)
+	planAgent := agent.NewPlanAndExecuteAgent(
+		planner,
+		func() agent.Agent {
+			return agent.NewReActAgent(
+				client,
+				toolRegistry,
+			)
+		},
+	)
 
 	//用户输入循环
 	reader := bufio.NewReader(os.Stdin)
@@ -90,6 +102,26 @@ func main() {
 			continue
 		}
 
+		if input == "/plan" || strings.HasPrefix(input, "/plan ") {
+			planInput := strings.TrimSpace(
+				strings.TrimPrefix(input, "/plan"),
+			)
+
+			if planInput == "" {
+				fmt.Println("请输入计划目标，例如：/plan 创建一个 Go Web 项目")
+				continue
+			}
+
+			answer, err := planAgent.Run(planInput)
+			if err != nil {
+				fmt.Println("plan agent error:", err)
+				continue
+			}
+
+			fmt.Println(answer)
+			continue
+		}
+
 		answer, err := agentInstance.Run(input)
 		if err != nil {
 			fmt.Println("agent error:", err)
@@ -117,6 +149,7 @@ func printBanner() {
 func printHelp() {
 	fmt.Println("💡 提示:")
 	fmt.Println("   - 输入你的问题或任务")
+	fmt.Println("   - 输入 '/plan <任务目标>' 先规划再逐步执行")
 	fmt.Println("   - 输入 'clear' 清空对话历史")
 	fmt.Println("   - 输入 'exit' 或 'quit' 退出")
 	fmt.Println()
