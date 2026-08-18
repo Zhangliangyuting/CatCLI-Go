@@ -7,7 +7,8 @@ This project is intentionally minimal. It is a first step from zero to a working
 ## Features
 
 - OpenAI-compatible LLM client
-- Multi-step agent loop with tool calling
+- ReAct agent loop with tool calling
+- Plan generation and sequential plan execution
 - Config-driven provider and tool registration
 - Built-in file and command tools
 - Interactive CLI with conversation history
@@ -45,9 +46,6 @@ openai_compatible:
   base_url: https://api.deepseek.com
   model: deepseek-v4-pro
 
-agent:
-  max_steps: 8
-
 providers:
   enabled:
     - builtin
@@ -70,7 +68,7 @@ export CATCLI_OPENAI_COMPATIBLE_BASE_URL=https://api.deepseek.com
 export CATCLI_OPENAI_COMPATIBLE_MODEL=deepseek-v4-pro
 ```
 
-For a minimal local setup, use `config/config.yaml` for tool and agent defaults, and `.env` for API credentials.
+For a minimal local setup, use `config/config.yaml` for provider and tool settings, and `.env` for API credentials.
 
 ## Run
 
@@ -86,12 +84,97 @@ Then type a question or task at the prompt:
 > list files in the current directory
 > read README.md and summarize it
 > create a simple Go hello world project under ./tmp/hello
+> /plan inspect the config package, improve validation, and run tests
 ```
 
 Useful commands inside the CLI:
 
+- `/plan <task goal>` generates a task plan and executes each task in dependency order
 - `clear` clears the conversation history
 - `exit` or `quit` exits the program
+
+## Plan Execution
+
+The `/plan` command uses `internal/plan` to ask the model for a structured JSON plan, computes a dependency-safe execution order, and then runs each task through a fresh ReAct agent. Each task receives the overall goal, its description, and the results from completed dependency tasks.
+
+If a task fails, the executor marks both the task and plan as `FAILED` and stops execution. Tasks that have not run remain `PENDING`.
+
+### Execution Flow
+
+```text
+/plan <task goal>
+        |
+        v
+LLMPlanGenerator.Generate
+        |
+        v
+Parse JSON into Plan and Tasks
+        |
+        v
+TopologicalSort (dependency-safe order)
+        |
+        v
+PlanAndExecuteAgent.Run
+        |
+        +--> create a fresh ReActAgent for task_1
+        +--> create a fresh ReActAgent for task_2
+        +--> ...
+        |
+        v
+Return the collected task results
+```
+
+The planner asks the model to return JSON in this shape:
+
+```json
+{
+  "goal": "The overall goal",
+  "summary": "A short plan summary",
+  "tasks": [
+    {
+      "id": "task_1",
+      "name": "A short task name",
+      "description": "Specific instructions for the executor",
+      "type": "FILE_READ",
+      "dependencies": []
+    },
+    {
+      "id": "task_2",
+      "name": "Analyze the file",
+      "description": "Analyze the previously read content",
+      "type": "ANALYSIS",
+      "dependencies": ["task_1"]
+    }
+  ]
+}
+```
+
+Supported task types are `PLANNING`, `FILE_READ`, `FILE_WRITE`, `COMMAND`, `ANALYSIS`, and `VERIFICATION`. Task types describe the plan but do not select tools directly; the ReAct agent decides which enabled tools to call from the task prompt.
+
+Before execution, task dependencies are validated and sorted with Kahn's topological-sort algorithm. Unknown dependencies, self-dependencies, duplicate task IDs, invalid task types, and dependency cycles cause plan generation to fail before any task runs.
+
+Each task uses a new ReAct agent so that conversation history from one task does not accidentally leak into another. Required context is passed explicitly through the task prompt:
+
+- the overall plan goal;
+- the current task description;
+- completed dependency descriptions and results;
+- instructions to execute only the current task.
+
+The main implementation files are:
+
+- `internal/plan/plan_generator.go`: requests and parses the structured plan;
+- `internal/plan/plan.go`: stores the plan and computes dependency order;
+- `internal/plan/task.go`: stores task state, dependencies, results, and errors;
+- `internal/agent/plan_execute_agent.go`: executes tasks and passes dependency results;
+- `cmd/catcli/main.go`: routes `/plan` commands to the plan executor.
+
+Plan execution is currently sequential even when multiple tasks have no dependencies. It stops at the first failed task and does not currently retry or automatically replan.
+
+## ReAct Loop
+
+The ReAct agent keeps calling the model while the model requests tools. Tool results are appended to the conversation and sent back to the model. The loop exits when the model returns a message without tool calls, or when an LLM request fails.
+
+There is currently no fixed step limit. If the model keeps requesting tools indefinitely, stop the CLI with `Ctrl+C`.
 
 ## Built-in Tools
 
@@ -117,11 +200,13 @@ The `builtin` provider currently exposes these tools:
 
 If you want to study how the agent is built, a good progression is:
 
-1. Understand the chat loop in `internal/agent/agent.go`.
-2. Inspect how messages and tool calls are represented in `internal/llm/message.go`.
-3. Review tool registration and dispatch in `internal/tool/tool_registry.go`.
-4. Add one new tool and wire it into the registry.
-5. Improve the system prompt, history handling, or error recovery step by step.
+1. Understand the `Agent` interface in `internal/agent/agent.go`.
+2. Follow the ReAct loop in `internal/agent/react_agent.go`.
+3. Inspect how messages and tool calls are represented in `internal/llm/message.go`.
+4. Review tool registration and dispatch in `internal/tool/tool_registry.go`.
+5. Read the planner and executor flow in `internal/plan` and `internal/agent/plan_execute_agent.go`.
+6. Add one new tool and wire it into the registry.
+7. Improve the system prompt, history handling, or error recovery step by step.
 
 This keeps the codebase small enough to understand while still showing the full path from input to model call to tool execution.
 
@@ -130,9 +215,10 @@ This keeps the codebase small enough to understand while still showing the full 
 ```text
 cmd/catcli/                 CLI entrypoint
 config/                     Runtime and example YAML config
-internal/agent/             Agent loop and tool-call handling
+internal/agent/             Agent interface, ReAct loop, and plan executor
 internal/config/            Viper-based config loading
 internal/llm/               OpenAI-compatible chat client
+internal/plan/              Plan generation, dependency ordering, execution
 internal/tool/              Tool definitions, handlers, providers, registry
 ```
 
@@ -149,3 +235,11 @@ Format code:
 ```bash
 go fmt ./...
 ```
+
+Run static checks:
+
+```bash
+go vet ./...
+```
+
+See [TESTING.md](TESTING.md) for the complete test plan, unit-test cases, and manual CLI checks.
