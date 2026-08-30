@@ -19,13 +19,14 @@ type Plan struct {
 	endTime        time.Time
 }
 
-func NewPlan(id string, goal string) *Plan {
+func NewPlan(id string, goal string, summary string) *Plan {
 	return &Plan{
 		id:             id,
 		goal:           goal,
 		tasks:          make(map[string]*Task),
 		executionOrder: make([]string, 0),
 		status:         PLAN_CREATED,
+		summary:        summary,
 	}
 }
 
@@ -36,11 +37,13 @@ type rawPlan struct {
 }
 
 type rawTask struct {
-	ID           string   `json:"id"`
-	Name         string   `json:"name"`
-	Description  string   `json:"description"`
-	Type         TaskType `json:"type"`
-	Dependencies []string `json:"dependencies"`
+	ID             string   `json:"id"`
+	Name           string   `json:"name"`
+	Description    string   `json:"description"`
+	Type           TaskType `json:"type"`
+	Dependencies   []string `json:"dependencies"`
+	ReadResources  []string `json:"read_resources"`
+	WriteResources []string `json:"write_resources"`
 }
 
 type PlanStatus string
@@ -65,6 +68,11 @@ func (p *Plan) MarkCompleted() {
 
 func (p *Plan) MarkFailed() {
 	p.status = PLAN_FAILED
+	p.endTime = time.Now()
+}
+
+func (p *Plan) MarkCancelled() {
+	p.status = PLAN_CANCELLED
 	p.endTime = time.Now()
 }
 
@@ -237,14 +245,6 @@ func taskNumber(id string) (int, bool) {
 	return number, err == nil
 }
 
-func (p *Plan) WriteSummary(summary string) (*Task, bool) {
-	if p.summary == "" {
-		p.summary = summary
-		return nil, false
-	}
-	return nil, false
-}
-
 func (p *Plan) TaskByID(taskID string) (*Task, bool) {
 	task, exists := p.tasks[taskID]
 	return task, exists
@@ -256,4 +256,12 @@ func (p *Plan) Goal() string {
 
 func (p *Plan) ExecutionOrder() []string {
 	return p.executionOrder
+}
+
+func (p *Plan) Status() PlanStatus {
+	return p.status
+}
+
+func (p *Plan) Summary() string {
+	return p.summary
 }

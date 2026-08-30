@@ -1,6 +1,7 @@
 package tool
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -49,7 +50,14 @@ func CreateProjectDefinition() Definition {
 	}
 }
 
-func CreateProjectHandler(args map[string]interface{}) (string, error) {
+func CreateProjectHandler(
+	ctx context.Context,
+	args map[string]interface{},
+) (string, error) {
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
+
 	root, ok := args["root"].(string)
 	if !ok || root == "" {
 		return "", fmt.Errorf("root is required")
@@ -68,6 +76,10 @@ func CreateProjectHandler(args map[string]interface{}) (string, error) {
 	createdFiles := 0
 
 	for _, rawFile := range rawFiles {
+		if err := ctx.Err(); err != nil {
+			return "", err
+		}
+
 		fileMap, ok := rawFile.(map[string]interface{})
 		if !ok {
 			return "", fmt.Errorf("invalid file item")
@@ -93,18 +105,7 @@ func CreateProjectHandler(args map[string]interface{}) (string, error) {
 		}
 
 		fullPath := filepath.Join(root, cleanRelativePath)
-
-		if _, err := os.Stat(fullPath); err == nil && !overwrite {
-			return "", fmt.Errorf("file already exists: %s", fullPath)
-		} else if err != nil && !os.IsNotExist(err) {
-			return "", err
-		}
-
-		if err := os.MkdirAll(filepath.Dir(fullPath), 0755); err != nil {
-			return "", err
-		}
-
-		if err := os.WriteFile(fullPath, []byte(content), 0644); err != nil {
+		if err := writeProjectFile(ctx, fullPath, content, overwrite); err != nil {
 			return "", err
 		}
 
@@ -112,4 +113,27 @@ func CreateProjectHandler(args map[string]interface{}) (string, error) {
 	}
 
 	return fmt.Sprintf("create_project completed, wrote %d file(s) under %s", createdFiles, root), nil
+}
+
+func writeProjectFile(
+	ctx context.Context,
+	fullPath string,
+	content string,
+	overwrite bool,
+) error {
+	unlock := fileLocks.lock(fullPath)
+	defer unlock()
+
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if _, err := os.Stat(fullPath); err == nil && !overwrite {
+		return fmt.Errorf("file already exists: %s", fullPath)
+	} else if err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(fullPath), 0755); err != nil {
+		return err
+	}
+	return os.WriteFile(fullPath, []byte(content), 0644)
 }

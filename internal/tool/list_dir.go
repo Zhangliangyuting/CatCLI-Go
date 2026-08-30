@@ -1,6 +1,7 @@
 package tool
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -26,7 +27,14 @@ func ListDirDefinition() Definition {
 	}
 }
 
-func ListDirHandler(args map[string]interface{}) (string, error) {
+func ListDirHandler(
+	ctx context.Context,
+	args map[string]interface{},
+) (string, error) {
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
+
 	pathValue, ok := args["path"].(string)
 	if !ok || pathValue == "" {
 		return "", fmt.Errorf("path is required")
@@ -40,6 +48,10 @@ func ListDirHandler(args map[string]interface{}) (string, error) {
 	var result []map[string]interface{}
 
 	for _, entry := range entries {
+		if err := ctx.Err(); err != nil {
+			return "", err
+		}
+
 		entryType := "file"
 		if entry.IsDir() {
 			entryType = "dir"

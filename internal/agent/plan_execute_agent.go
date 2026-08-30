@@ -2,101 +2,188 @@ package agent
 
 import (
 	"AgentCLI/internal/plan"
+	"context"
 	"fmt"
 	"strings"
+	"time"
 )
 
 type PlanAndExecuteAgent struct {
-	planner     plan.PlanGenerator
-	executor    func() Agent
-	currentPlan *plan.Plan
+	planner           plan.PlanGenerator
+	reviewer          PlanReviewer
+	scheduler         *planScheduler
+	currentPlan       *plan.Plan
+	maxReplanAttempts int
+	planTimeout       time.Duration
 }
 
-func NewPlanAndExecuteAgent(planner plan.PlanGenerator, executor func() Agent) *PlanAndExecuteAgent {
+var _ Agent = (*PlanAndExecuteAgent)(nil)
+var _ ObservableAgent = (*PlanAndExecuteAgent)(nil)
+
+func NewPlanAndExecuteAgent(
+	planner plan.PlanGenerator,
+	executor func() Agent,
+	reviewer PlanReviewer,
+	maxReplanAttempts int,
+	maxWorkers int,
+	taskTimeout time.Duration,
+	planTimeout time.Duration,
+) *PlanAndExecuteAgent {
 	return &PlanAndExecuteAgent{
-		planner:  planner,
-		executor: executor,
+		planner:           planner,
+		reviewer:          reviewer,
+		scheduler:         newPlanScheduler(maxWorkers, taskTimeout, executor),
+		maxReplanAttempts: maxReplanAttempts,
+		planTimeout:       planTimeout,
 	}
 }
 
-func (a *PlanAndExecuteAgent) Run(input string) (string, error) {
-	p, err := a.planner.Generate(input)
+func (a *PlanAndExecuteAgent) Run(
+	ctx context.Context,
+	input string,
+) (string, error) {
+	return a.RunWithObserver(ctx, input, nil)
+}
+
+func (a *PlanAndExecuteAgent) RunWithObserver(
+	ctx context.Context,
+	input string,
+	observer Observer,
+) (string, error) {
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
+
+	p, err := a.planner.Generate(ctx, input)
 	if err != nil {
 		return "", fmt.Errorf("generate plan: %w", err)
 	}
+	emit(observer, Event{
+		Type:    EventPlanGenerated,
+		Title:   "计划已生成",
+		Content: p.Visualize(),
+	})
 
-	p.MarkRunning()
-
-	var results strings.Builder
-
-	for _, taskID := range p.ExecutionOrder() {
-		t, exists := p.TaskByID(taskID)
-		if !exists {
-			p.MarkFailed()
-			return "", fmt.Errorf("task not found: %s", taskID)
-		}
-
-		t.MarkRunning()
-
-		taskPrompt := buildTaskPrompt(p, t)
-
-		executor := a.executor()
-		result, err := executor.Run(taskPrompt)
-		if err != nil {
-			t.MarkFailed(err)
-			p.MarkFailed()
-			return "", fmt.Errorf("task %s failed: %w", taskID, err)
-		}
-
-		t.MarkCompleted(result)
-
-		fmt.Fprintf(
-			&results,
-			"%s: %s\n",
-			taskID,
-			result,
-		)
+	if a.reviewer == nil {
+		return "", fmt.Errorf("review plan: reviewer is nil")
 	}
 
-	p.MarkCompleted()
-	return results.String(), nil
-}
+	for {
+		if err := ctx.Err(); err != nil {
+			p.MarkCancelled()
+			return "", err
+		}
 
-func buildTaskPrompt(p *plan.Plan, task *plan.Task) string {
-	var context strings.Builder
+		a.currentPlan = p
 
-	fmt.Fprintf(&context, "整体目标：\n%s\n\n", p.Goal())
-	fmt.Fprintf(&context, "当前任务：\n%s\n\n", task.Description())
+		action, feedback, err := a.reviewer.Review(p)
+		if err != nil {
+			return "", fmt.Errorf("review plan: %w", err)
+		}
+		if err := ctx.Err(); err != nil {
+			p.MarkCancelled()
+			return "", err
+		}
 
-	if len(task.Dependencies()) > 0 {
-		context.WriteString("前置任务及其执行结果：\n")
-
-		for _, dependencyID := range task.Dependencies() {
-			dependency, ok := p.TaskByID(dependencyID)
-			if !ok {
-				continue
+		switch action {
+		case PlanExecute:
+			return a.executeWithReplanObserver(ctx, p, observer)
+		case PlanRevise:
+			if strings.TrimSpace(feedback) == "" {
+				return "", fmt.Errorf("revise plan: feedback is empty")
 			}
 
-			fmt.Fprintf(
-				&context,
-				"- %s\n  结果：%s\n",
-				dependency.Description(),
-				dependency.Result(),
-			)
+			p, err = a.planner.Revise(ctx, p, feedback)
+			if err != nil {
+				return "", fmt.Errorf("revise plan: %w", err)
+			}
+			emit(observer, Event{
+				Type:    EventPlanRevised,
+				Title:   "计划已修改",
+				Content: p.Visualize(),
+			})
+		case PlanCancel:
+			p.MarkCancelled()
+			emit(observer, Event{
+				Type:    EventPlanCancelled,
+				Title:   "计划已取消",
+				Content: p.Visualize(),
+			})
+			return "计划已取消，已返回 ReAct 模式", nil
+		default:
+			return "", fmt.Errorf("review plan: unknown action %q", action)
+		}
+	}
+}
+
+func (a *PlanAndExecuteAgent) executeWithReplan(
+	ctx context.Context,
+	p *plan.Plan,
+) (string, error) {
+	return a.executeWithReplanObserver(ctx, p, nil)
+}
+
+func (a *PlanAndExecuteAgent) executeWithReplanObserver(
+	ctx context.Context,
+	p *plan.Plan,
+	observer Observer,
+) (string, error) {
+	var allResults strings.Builder
+	planCtx := ctx
+	cancel := func() {}
+	if a.planTimeout > 0 {
+		planCtx, cancel = context.WithTimeout(ctx, a.planTimeout)
+	}
+	defer cancel()
+
+	for replanCount := 0; ; replanCount++ {
+		a.currentPlan = p
+
+		if replanCount > 0 {
+			emit(observer, Event{
+				Type:    EventPlanReplanning,
+				Title:   "已根据执行错误重新规划",
+				Content: p.Visualize(),
+			})
 		}
 
-		context.WriteString("\n")
+		result, executeErr := a.scheduler.ExecuteWithObserver(
+			planCtx,
+			p,
+			observer,
+		)
+		allResults.WriteString(result)
+
+		if executeErr == nil {
+			return allResults.String(), nil
+		}
+		if planCtx.Err() != nil {
+			return allResults.String(), planCtx.Err()
+		}
+
+		if replanCount >= a.maxReplanAttempts {
+			return allResults.String(), executeErr
+		}
+
+		emit(observer, Event{
+			Type:    EventPlanReplanning,
+			Title:   "执行失败，准备重新规划",
+			Content: executeErr.Error(),
+		})
+
+		replanned, err := a.planner.Replan(
+			planCtx,
+			p,
+			executeErr.Error(),
+		)
+		if err != nil {
+			return allResults.String(), fmt.Errorf(
+				"replan after execution failure: %w",
+				err,
+			)
+		}
+		p = replanned
 	}
-
-	context.WriteString(`执行要求：
-1. 只执行当前任务，不要重新规划整个任务。
-2. 可以使用提供的工具完成任务。
-3. 使用前置任务结果作为上下文。
-4. 完成后简洁说明执行结果。
-5. 如果无法完成，明确说明原因。
-`)
-
-	return context.String()
 }
 
 func (a *PlanAndExecuteAgent) CurrentPlan() *plan.Plan {

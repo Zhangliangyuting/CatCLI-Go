@@ -8,9 +8,13 @@ This project is intentionally minimal. It is a first step from zero to a working
 
 - OpenAI-compatible LLM client
 - ReAct agent loop with tool calling
-- Plan generation and sequential plan execution
+- Automatic routing between ReAct and Plan-and-Execute modes
+- Plan generation with dependency-aware parallel execution
+- Task- and plan-level timeout and cancellation propagation
+- Structured execution events for CLI output and observers
+- Scheduler resource conflict detection and per-file read/write locks
 - Config-driven provider and tool registration
-- Built-in file and command tools
+- Built-in file and command tools with safety checks
 - Interactive CLI with conversation history
 
 ## Requirements
@@ -46,6 +50,12 @@ openai_compatible:
   base_url: https://api.deepseek.com
   model: deepseek-v4-pro
 
+agent:
+  max_replan_attempts: 3
+  max_workers: 3
+  task_timeout: 5m
+  plan_timeout: 30m
+
 providers:
   enabled:
     - builtin
@@ -70,6 +80,12 @@ export CATCLI_OPENAI_COMPATIBLE_MODEL=deepseek-v4-pro
 
 For a minimal local setup, use `config/config.yaml` for provider and tool settings, and `.env` for API credentials.
 
+`agent.max_replan_attempts` controls how many replacement plans may be generated after execution failures. Set it to `0` to stop immediately on the first failed plan.
+
+`agent.max_workers` limits how many dependency-ready plan tasks may run concurrently.
+
+`agent.task_timeout` limits one plan task. `agent.plan_timeout` limits the complete approved plan, including replanning attempts. The plan timeout must not be shorter than the task timeout.
+
 ## Run
 
 Start the CLI:
@@ -84,25 +100,41 @@ Then type a question or task at the prompt:
 > list files in the current directory
 > read README.md and summarize it
 > create a simple Go hello world project under ./tmp/hello
+> explain what the resource tracker does
 > /plan inspect the config package, improve validation, and run tests
+> /react explain this function without creating a plan
 ```
 
 Useful commands inside the CLI:
 
-- `/plan <task goal>` generates a task plan and executes each task in dependency order
+- ordinary input is automatically routed to ReAct or Plan-and-Execute mode
+- `/react <task>` forces direct ReAct execution
+- `/plan <task goal>` forces plan generation, review, and dependency-aware execution
 - `clear` clears the conversation history
 - `exit` or `quit` exits the program
 
+The hybrid router first honors `/react` and `/plan`, then applies deterministic rules for clearly simple or complex tasks. Ambiguous input is classified with one LLM request. An unrecognized classifier response safely falls back to ReAct.
+
 ## Plan Execution
 
-The `/plan` command uses `internal/plan` to ask the model for a structured JSON plan, computes a dependency-safe execution order, and then runs each task through a fresh ReAct agent. Each task receives the overall goal, its description, and the results from completed dependency tasks.
+Plan mode uses `internal/plan` to ask the model for a structured JSON plan and computes a dependency-safe execution order. The CLI then displays the plan and lets you execute it, revise it with feedback, or cancel and return to the normal ReAct prompt. An approved plan runs each task through a fresh ReAct agent. Each task receives the overall goal, its description, declared resources, and the results from completed dependency tasks.
 
 If a task fails, the executor marks both the task and plan as `FAILED` and stops execution. Tasks that have not run remain `PENDING`.
 
 ### Execution Flow
 
 ```text
-/plan <task goal>
+User input
+        |
+        v
+HybridModeRouter
+        |
+        +--> ReActAgent for direct execution
+        |
+        +--> PlanAndExecuteAgent
+        |
+        v
+PlanAndExecuteAgent.Run
         |
         v
 LLMPlanGenerator.Generate
@@ -114,7 +146,14 @@ Parse JSON into Plan and Tasks
 TopologicalSort (dependency-safe order)
         |
         v
-PlanAndExecuteAgent.Run
+PlanReviewer
+        |
+        +--> execute the current plan
+        +--> revise with feedback --> review the replacement plan
+        +--> cancel --> return to the ReAct prompt
+        |
+        v
+PlanScheduler.Execute
         |
         +--> create a fresh ReActAgent for task_1
         +--> create a fresh ReActAgent for task_2
@@ -136,14 +175,18 @@ The planner asks the model to return JSON in this shape:
       "name": "A short task name",
       "description": "Specific instructions for the executor",
       "type": "FILE_READ",
-      "dependencies": []
+      "dependencies": [],
+      "read_resources": ["README.md"],
+      "write_resources": []
     },
     {
       "id": "task_2",
       "name": "Analyze the file",
       "description": "Analyze the previously read content",
       "type": "ANALYSIS",
-      "dependencies": ["task_1"]
+      "dependencies": ["task_1"],
+      "read_resources": ["README.md"],
+      "write_resources": []
     }
   ]
 }
@@ -158,6 +201,7 @@ Each task uses a new ReAct agent so that conversation history from one task does
 - the overall plan goal;
 - the current task description;
 - completed dependency descriptions and results;
+- declared read and write resources;
 - instructions to execute only the current task.
 
 The main implementation files are:
@@ -165,10 +209,79 @@ The main implementation files are:
 - `internal/plan/plan_generator.go`: requests and parses the structured plan;
 - `internal/plan/plan.go`: stores the plan and computes dependency order;
 - `internal/plan/task.go`: stores task state, dependencies, results, and errors;
-- `internal/agent/plan_execute_agent.go`: executes tasks and passes dependency results;
-- `cmd/catcli/main.go`: routes `/plan` commands to the plan executor.
+- `internal/agent/plan_execute_agent.go`: coordinates plan review, revision, cancellation, and execution;
+- `internal/agent/plan_scheduler.go`: owns the worker pool, dynamic DAG scheduling, task timeouts, and fail-fast behavior;
+- `internal/agent/resource_tracker.go`: prevents tasks with conflicting declared resources from running together;
+- `cmd/catcli/main.go`: assembles the router, agents, observer, tools, cancellation, and CLI reviewer.
 
-Plan execution is currently sequential even when multiple tasks have no dependencies. It stops at the first failed task and does not currently retry or automatically replan.
+Plan execution uses a bounded worker pool. Dependency-ready tasks run concurrently up to `agent.max_workers`, and completing a task immediately makes newly unblocked dependents eligible to run. The scheduler also considers declared resources: read/read access may overlap, while read/write and write/write access to the same normalized path are serialized. After a task failure, the scheduler stops dispatching new work, cancels running siblings, waits for dispatched tasks, and may generate a replacement plan up to `agent.max_replan_attempts` times.
+
+## Architecture and Helper Modules
+
+The runtime is divided into three layers:
+
+```text
+Entry helpers
+    routing / config / CLI
+             |
+             v
+Agent execution
+    ReActAgent / PlanAndExecuteAgent
+             |
+             v
+Execution infrastructure
+    events / scheduler / resource tracker / tool registry / file locks
+```
+
+The main helper modules are:
+
+| Module | Responsibility | Engineering safeguard |
+| --- | --- | --- |
+| `internal/routing/mode_router.go` | Selects ReAct or Plan mode using explicit commands, rules, and an LLM classifier | Invalid classifier output falls back to ReAct |
+| `internal/agent/event.go` | Defines structured Agent, Task, Plan, Tool, and token events | `SynchronizedObserver` serializes events from concurrent workers |
+| `internal/agent/plan_scheduler.go` | Runs the bounded worker pool and dynamically releases dependency-ready tasks | Enforces worker limits, task timeouts, cancellation, fail-fast, and worker shutdown |
+| `internal/agent/resource_tracker.go` | Tracks resources held by running tasks | Allows read/read concurrency and blocks read/write or write/write conflicts |
+| `internal/tool/tool_registry.go` | Registers enabled tools and dispatches LLM tool calls | Rejects unknown tools and propagates `context.Context` into handlers |
+| `internal/tool/file_lock.go` | Maintains one `sync.RWMutex` per normalized file path | Serializes actual file writes without blocking unrelated files |
+| `internal/plan/visualizer.go` | Renders plan status, progress, dependencies, and resources | Makes the generated plan inspectable before and during execution |
+| `internal/cli/plan_reviewer.go` | Provides a reusable terminal implementation of `PlanReviewer` | Requires an explicit execute, revise, or cancel decision |
+
+These safeguards operate at different boundaries. The scheduler resource tracker prevents known conflicting tasks from starting together. File locks protect actual file-tool operations if a declaration is incomplete. Each plan task receives a fresh ReAct agent so concurrent tasks never share conversation history.
+
+### Lifecycle and Cancellation
+
+The CLI creates a signal-aware context for each run. Cancellation and deadlines propagate through every layer:
+
+```text
+Ctrl+C or deadline
+        |
+        v
+CLI context
+        |
+        v
+Router / Agent / PlanScheduler
+        |
+        v
+ReActAgent / LLM client / ToolRegistry
+        |
+        v
+Tool handler and execute_command child process
+```
+
+Plan mode adds a timeout for the whole plan and a separate timeout for each task. A failed task cancels running siblings and stops new dispatches. Ordinary execution errors may trigger bounded replanning, while user cancellation and deadline expiration return immediately instead of starting another plan.
+
+### File and Resource Safety
+
+Plan tasks may declare `read_resources` and `write_resources`. The scheduler normalizes these paths and reserves them for the lifetime of each running task. Missing declarations remain valid for backward compatibility, so the file-tool layer provides a second safeguard:
+
+- `read_file` takes a shared read lock;
+- `edit_file` locks the complete read-modify-write transaction;
+- `write_file` locks the existence-check-and-write transaction;
+- `create_project` locks each destination file.
+
+`read_file` only accepts valid UTF-8 text up to 256 KiB. It rejects NUL bytes, invalid UTF-8, terminal control bytes, executables, images, archives, and other detected binary content before that content can reach the terminal or conversation history.
+
+Commands executed through `execute_command` can modify files without going through file-tool locks. Command tasks should therefore declare accurate write resources; stronger isolation would require a separate workspace or Git worktree per task.
 
 ## ReAct Loop
 
@@ -181,7 +294,7 @@ There is currently no fixed step limit. If the model keeps requesting tools inde
 The `builtin` provider currently exposes these tools:
 
 - `list_dir`: list files and directories under a path
-- `read_file`: read a file
+- `read_file`: read a UTF-8 text file up to 256 KiB and reject detected binary content
 - `edit_file`: replace an exact string in a file
 - `write_file`: write a full file, requiring `overwrite=true` for existing files
 - `create_project`: create a project structure from a list of files
@@ -204,9 +317,13 @@ If you want to study how the agent is built, a good progression is:
 2. Follow the ReAct loop in `internal/agent/react_agent.go`.
 3. Inspect how messages and tool calls are represented in `internal/llm/message.go`.
 4. Review tool registration and dispatch in `internal/tool/tool_registry.go`.
-5. Read the planner and executor flow in `internal/plan` and `internal/agent/plan_execute_agent.go`.
-6. Add one new tool and wire it into the registry.
-7. Improve the system prompt, history handling, or error recovery step by step.
+5. Follow event delivery in `internal/agent/event.go`.
+6. Read the planner and executor flow in `internal/plan` and `internal/agent/plan_execute_agent.go`.
+7. Study dynamic scheduling in `internal/agent/plan_scheduler.go`.
+8. Compare task-level resource tracking with tool-level file locking.
+9. Follow hybrid mode selection in `internal/routing/mode_router.go`.
+10. Add one new tool and wire it into the registry.
+11. Improve the system prompt, history handling, or error recovery step by step.
 
 This keeps the codebase small enough to understand while still showing the full path from input to model call to tool execution.
 
@@ -216,9 +333,11 @@ This keeps the codebase small enough to understand while still showing the full 
 cmd/catcli/                 CLI entrypoint
 config/                     Runtime and example YAML config
 internal/agent/             Agent interface, ReAct loop, and plan executor
+internal/cli/               Reusable CLI-specific implementations
 internal/config/            Viper-based config loading
 internal/llm/               OpenAI-compatible chat client
-internal/plan/              Plan generation, dependency ordering, execution
+internal/plan/              Plan generation, task state, dependency ordering, visualization
+internal/routing/           Hybrid ReAct/Plan mode selection
 internal/tool/              Tool definitions, handlers, providers, registry
 ```
 

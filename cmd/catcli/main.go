@@ -5,10 +5,14 @@ import (
 	"AgentCLI/internal/config"
 	"AgentCLI/internal/llm"
 	"AgentCLI/internal/plan"
+	"AgentCLI/internal/routing"
 	"AgentCLI/internal/tool"
 	"bufio"
+	"context"
+	"errors"
 	"fmt"
 	"os"
+	"os/signal"
 	"strings"
 )
 
@@ -60,8 +64,11 @@ func main() {
 
 	// 创建 Agent
 	agentInstance := agent.NewReActAgent(client, toolRegistry)
+	eventObserver := agent.SynchronizedObserver(printAgentEvent)
+	reader := bufio.NewReader(os.Stdin)
 
 	planner := plan.NewLLMPlanGenerator(client)
+	modeRouter := routing.NewHybridModeRouter(client)
 	planAgent := agent.NewPlanAndExecuteAgent(
 		planner,
 		func() agent.Agent {
@@ -70,11 +77,14 @@ func main() {
 				toolRegistry,
 			)
 		},
+		&cliPlanReviewer{reader: reader},
+		cfg.Agent.MaxReplanAttempts,
+		cfg.Agent.MaxWorkers,
+		cfg.Agent.TaskTimeout,
+		cfg.Agent.PlanTimeout,
 	)
 
 	//用户输入循环
-	reader := bufio.NewReader(os.Stdin)
-
 	fmt.Println("AgentCLI started. Type exit to quit.")
 
 	for {
@@ -102,35 +112,204 @@ func main() {
 			continue
 		}
 
-		if input == "/plan" || strings.HasPrefix(input, "/plan ") {
-			planInput := strings.TrimSpace(
-				strings.TrimPrefix(input, "/plan"),
-			)
-
-			if planInput == "" {
-				fmt.Println("请输入计划目标，例如：/plan 创建一个 Go Web 项目")
-				continue
-			}
-
-			answer, err := planAgent.Run(planInput)
-			if err != nil {
-				fmt.Println("plan agent error:", err)
-				continue
-			}
-
-			fmt.Println(answer)
-			continue
-		}
-
-		answer, err := agentInstance.Run(input)
+		answer, err := runWithInterrupt(
+			func(ctx context.Context) (string, error) {
+				return runRoutedInput(
+					ctx,
+					modeRouter,
+					agentInstance,
+					planAgent,
+					input,
+					eventObserver,
+				)
+			},
+		)
 		if err != nil {
-			fmt.Println("agent error:", err)
+			printRunError("agent error", err)
 			continue
 		}
 
 		fmt.Println(answer)
 	}
 
+}
+
+func runRoutedInput(
+	ctx context.Context,
+	router routing.ModeRouter,
+	reactAgent agent.ObservableAgent,
+	planAgent agent.ObservableAgent,
+	input string,
+	observer agent.Observer,
+) (string, error) {
+	decision, err := router.Route(ctx, input)
+	if err != nil {
+		return "", err
+	}
+
+	if decision.Source != routing.SourceExplicit {
+		fmt.Printf(
+			"[router] 自动选择 %s：%s\n",
+			decision.Mode,
+			decision.Reason,
+		)
+	}
+
+	switch decision.Mode {
+	case routing.ModeReact:
+		return reactAgent.RunWithObserver(
+			ctx,
+			decision.Input,
+			observer,
+		)
+	case routing.ModePlan:
+		return planAgent.RunWithObserver(
+			ctx,
+			decision.Input,
+			observer,
+		)
+	default:
+		return "", fmt.Errorf(
+			"unsupported execution mode %q",
+			decision.Mode,
+		)
+	}
+}
+
+func runWithInterrupt(
+	run func(context.Context) (string, error),
+) (string, error) {
+	ctx, stop := signal.NotifyContext(
+		context.Background(),
+		os.Interrupt,
+	)
+	defer stop()
+
+	return run(ctx)
+}
+
+func printRunError(prefix string, err error) {
+	switch {
+	case errors.Is(err, context.Canceled):
+		fmt.Println("当前执行已取消")
+	case errors.Is(err, context.DeadlineExceeded):
+		fmt.Println("当前执行已超时")
+	default:
+		fmt.Printf("%s: %v\n", prefix, err)
+	}
+}
+
+func printAgentEvent(event agent.Event) {
+	prefix := "[agent]"
+	if event.TaskID != "" {
+		prefix = "[" + event.TaskID + "]"
+	}
+
+	switch event.Type {
+	case agent.EventTokenUsage:
+		fmt.Printf("%s token: %s\n", prefix, event.Content)
+	case agent.EventToolCall:
+		fmt.Printf(
+			"%s tool call %s: %s\n",
+			prefix,
+			event.Title,
+			event.Content,
+		)
+	case agent.EventToolResult:
+		fmt.Printf(
+			"%s tool result %s:\n%s\n",
+			prefix,
+			event.Title,
+			event.Content,
+		)
+	case agent.EventTaskStarted:
+		fmt.Printf(
+			"\n%s 开始执行：%s\n%s\n",
+			prefix,
+			event.Title,
+			event.Content,
+		)
+	case agent.EventTaskCompleted:
+		fmt.Printf(
+			"\n%s 任务完成：%s\n%s\n",
+			prefix,
+			event.Title,
+			event.Content,
+		)
+	case agent.EventTaskFailed:
+		fmt.Printf(
+			"\n%s 任务失败：%s\n%s\n",
+			prefix,
+			event.Title,
+			event.Content,
+		)
+	case agent.EventTaskCancelled:
+		fmt.Printf(
+			"\n%s 任务已取消：%s\n%s\n",
+			prefix,
+			event.Title,
+			event.Content,
+		)
+	case agent.EventTaskTimeout:
+		fmt.Printf(
+			"\n%s 任务执行超时：%s\n%s\n",
+			prefix,
+			event.Title,
+			event.Content,
+		)
+	case agent.EventPlanGenerated, agent.EventPlanRevised,
+		agent.EventPlanCancelled:
+		fmt.Printf("\n[plan] %s\n", event.Title)
+	case agent.EventPlanReplanning, agent.EventPlanCompleted,
+		agent.EventPlanFailed, agent.EventPlanTimeout:
+		fmt.Printf(
+			"\n[plan] %s\n%s\n",
+			event.Title,
+			event.Content,
+		)
+	}
+}
+
+type cliPlanReviewer struct {
+	reader *bufio.Reader
+}
+
+func (r *cliPlanReviewer) Review(
+	p *plan.Plan,
+) (agent.PlanAction, string, error) {
+	for {
+		fmt.Println(p.Visualize())
+		fmt.Print("[e] 执行  [r] 修改计划  [c] 取消: ")
+
+		input, err := r.reader.ReadString('\n')
+		if err != nil {
+			return "", "", err
+		}
+
+		switch strings.ToLower(strings.TrimSpace(input)) {
+		case "e", "execute":
+			return agent.PlanExecute, "", nil
+		case "r", "revise", "replan":
+			fmt.Print("请输入计划修改意见: ")
+
+			feedback, err := r.reader.ReadString('\n')
+			if err != nil {
+				return "", "", err
+			}
+
+			feedback = strings.TrimSpace(feedback)
+			if feedback == "" {
+				fmt.Println("修改意见不能为空")
+				continue
+			}
+
+			return agent.PlanRevise, feedback, nil
+		case "c", "cancel":
+			return agent.PlanCancel, "", nil
+		default:
+			fmt.Println("无效选项，请输入 e、r 或 c")
+		}
+	}
 }
 
 func printBanner() {
@@ -148,8 +327,9 @@ func printBanner() {
 
 func printHelp() {
 	fmt.Println("💡 提示:")
-	fmt.Println("   - 输入你的问题或任务")
-	fmt.Println("   - 输入 '/plan <任务目标>' 先规划再逐步执行")
+	fmt.Println("   - 直接输入任务时自动选择 ReAct 或 Plan 模式")
+	fmt.Println("   - 输入 '/react <任务>' 强制使用 ReAct 模式")
+	fmt.Println("   - 输入 '/plan <任务>' 强制使用 Plan 模式")
 	fmt.Println("   - 输入 'clear' 清空对话历史")
 	fmt.Println("   - 输入 'exit' 或 'quit' 退出")
 	fmt.Println()

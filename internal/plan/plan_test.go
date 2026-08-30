@@ -7,7 +7,7 @@ import (
 )
 
 func TestTopologicalSortUsesDependencyOrder(t *testing.T) {
-	p := NewPlan("plan_1", "执行三个任务")
+	p := NewPlan("plan_1", "执行三个任务", "测试依赖顺序")
 
 	task1 := NewTask("task_1", "一", "第一个任务", ANALYSIS, nil)
 	task2 := NewTask("task_2", "二", "第二个任务", ANALYSIS, []string{"task_1"})
@@ -30,7 +30,7 @@ func TestTopologicalSortUsesDependencyOrder(t *testing.T) {
 }
 
 func TestTopologicalSortDetectsCycle(t *testing.T) {
-	p := NewPlan("plan_1", "循环依赖")
+	p := NewPlan("plan_1", "循环依赖", "测试循环依赖检测")
 	task1 := NewTask("task_1", "一", "第一个任务", ANALYSIS, nil)
 	task2 := NewTask("task_2", "二", "第二个任务", ANALYSIS, nil)
 
@@ -50,5 +50,14 @@ func TestTopologicalSortDetectsCycle(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "cycle detected") {
 		t.Fatalf("TopologicalSort() error = %q, want cycle detected", err)
+	}
+}
+
+func TestVisualizeIncludesSummary(t *testing.T) {
+	p := NewPlan("plan_1", "发布应用", "构建应用并运行测试")
+
+	visualization := p.Visualize()
+	if !strings.Contains(visualization, "摘要：构建应用并运行测试") {
+		t.Fatalf("Visualize() = %q, want plan summary", visualization)
 	}
 }

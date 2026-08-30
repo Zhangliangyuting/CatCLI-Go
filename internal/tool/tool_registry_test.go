@@ -1,0 +1,40 @@
+package tool
+
+import (
+	"context"
+	"errors"
+	"testing"
+)
+
+func TestToolRegistryPassesContextToHandler(t *testing.T) {
+	registry := NewToolRegistry()
+	registry.RegisterTool(Definition{
+		Type: "function",
+		FunctionDefinition: FunctionDefinition{
+			Name: "wait_for_cancel",
+		},
+	}, func(ctx context.Context, _ map[string]interface{}) (string, error) {
+		<-ctx.Done()
+		return "", ctx.Err()
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	_, err := registry.Execute(ctx, "wait_for_cancel", nil)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("Execute() error = %v, want context.Canceled", err)
+	}
+}
+
+func TestExecuteCommandUsesParentContext(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	_, err := ExecuteCommandHandler(ctx, map[string]interface{}{
+		"command": "go test",
+	})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("ExecuteCommandHandler() error = %v, want context.Canceled", err)
+	}
+}

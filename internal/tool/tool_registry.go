@@ -1,6 +1,9 @@
 package tool
 
-import "fmt"
+import (
+	"context"
+	"fmt"
+)
 
 type Definition struct {
 	Type               string             `json:"type"`
@@ -13,7 +16,10 @@ type FunctionDefinition struct {
 	Parameters  map[string]interface{} `json:"parameters"`
 }
 
-type Handler func(args map[string]interface{}) (string, error)
+type Handler func(
+	ctx context.Context,
+	args map[string]interface{},
+) (string, error)
 
 type Tool struct {
 	Definition Definition
@@ -44,13 +50,17 @@ func (r *ToolRegistry) RegisterTool(definition Definition, handler Handler) {
 	}
 }
 
-func (r *ToolRegistry) Execute(name string, args map[string]interface{}) (string, error) {
+func (r *ToolRegistry) Execute(
+	ctx context.Context,
+	name string,
+	args map[string]interface{},
+) (string, error) {
 	toolDef, exists := r.tools[name]
 	if !exists {
 		return "", fmt.Errorf("tool not found: %s", name)
 	}
 
-	return toolDef.Handler(args)
+	return toolDef.Handler(ctx, args)
 }
 
 func (r *ToolRegistry) ToolDefinitions() []Definition {

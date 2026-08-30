@@ -3,17 +3,19 @@ package plan
 import "time"
 
 type Task struct {
-	id           string
-	name         string
-	description  string
-	taskType     TaskType
-	status       TaskStatus
-	result       string
-	err          error
-	dependencies []string // 依赖的其他任务
-	dependents   []string // 依赖此任务的其他任务
-	startTime    time.Time
-	endTime      time.Time
+	id             string
+	name           string
+	description    string
+	taskType       TaskType
+	status         TaskStatus
+	result         string
+	err            error
+	dependencies   []string // 依赖的其他任务
+	dependents     []string // 依赖此任务的其他任务
+	readResources  []string // 执行期间只读取的资源路径
+	writeResources []string // 执行期间可能修改的资源路径
+	startTime      time.Time
+	endTime        time.Time
 }
 
 type TaskType string
@@ -34,6 +36,7 @@ const (
 	RUNNING   TaskStatus = "RUNNING"   // 正在执行
 	COMPLETED TaskStatus = "COMPLETED" // 执行完成
 	FAILED    TaskStatus = "FAILED"    // 执行失败
+	CANCELLED TaskStatus = "CANCELLED" // 执行被取消
 	SKIPPED   TaskStatus = "SKIPPED"   // 被跳过
 	BLOCKED   TaskStatus = "BLOCKED"   // 依赖失败或缺少输入
 )
@@ -66,6 +69,12 @@ func (t *Task) MarkCompleted(result string) {
 
 func (t *Task) MarkFailed(err error) {
 	t.status = FAILED
+	t.err = err
+	t.endTime = time.Now()
+}
+
+func (t *Task) MarkCancelled(err error) {
+	t.status = CANCELLED
 	t.err = err
 	t.endTime = time.Now()
 }
@@ -116,6 +125,14 @@ func (t *Task) ID() string {
 	return t.id
 }
 
+func (t *Task) Name() string {
+	return t.name
+}
+
+func (t *Task) Type() TaskType {
+	return t.taskType
+}
+
 func (t *Task) Status() TaskStatus {
 	return t.status
 }
@@ -138,4 +155,17 @@ func (t *Task) SetDependencies(dependencies []string) {
 
 func (t *Task) SetDependents(dependents []string) {
 	t.dependents = dependents
+}
+
+func (t *Task) ReadResources() []string {
+	return append([]string(nil), t.readResources...)
+}
+
+func (t *Task) WriteResources() []string {
+	return append([]string(nil), t.writeResources...)
+}
+
+func (t *Task) SetResources(readResources, writeResources []string) {
+	t.readResources = append([]string(nil), readResources...)
+	t.writeResources = append([]string(nil), writeResources...)
 }

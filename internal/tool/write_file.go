@@ -1,6 +1,7 @@
 package tool
 
 import (
+	"context"
 	"fmt"
 	"os"
 )
@@ -33,7 +34,14 @@ func WriteFileDefinition() Definition {
 	}
 }
 
-func WriteFileHandler(args map[string]interface{}) (string, error) {
+func WriteFileHandler(
+	ctx context.Context,
+	args map[string]interface{},
+) (string, error) {
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
+
 	filePath, ok := args["file_path"].(string)
 	if !ok || filePath == "" {
 		return "", fmt.Errorf("file_path is required")
@@ -49,9 +57,20 @@ func WriteFileHandler(args map[string]interface{}) (string, error) {
 		overwrite = value
 	}
 
+	// Keep the existence check and write in one critical section.
+	unlock := fileLocks.lock(filePath)
+	defer unlock()
+
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
+
 	if _, err := os.Stat(filePath); err == nil && !overwrite {
 		return "", fmt.Errorf("file already exists: %s, set overwrite=true to replace it", filePath)
 	} else if err != nil && !os.IsNotExist(err) {
+		return "", err
+	}
+	if err := ctx.Err(); err != nil {
 		return "", err
 	}
 

@@ -2,6 +2,7 @@ package tool
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os/exec"
 	"strings"
@@ -32,7 +33,14 @@ func ExecuteCommandDefinition() Definition {
 	}
 }
 
-func ExecuteCommandHandler(args map[string]interface{}) (string, error) {
+func ExecuteCommandHandler(
+	ctx context.Context,
+	args map[string]interface{},
+) (string, error) {
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
+
 	command, ok := args["command"].(string)
 	if !ok || strings.TrimSpace(command) == "" {
 		return "", fmt.Errorf("command is required")
@@ -58,14 +66,23 @@ func ExecuteCommandHandler(args map[string]interface{}) (string, error) {
 		timeoutSeconds = int(value)
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(timeoutSeconds)*time.Second)
+	commandCtx, cancel := context.WithTimeout(
+		ctx,
+		time.Duration(timeoutSeconds)*time.Second,
+	)
 	defer cancel()
 
-	cmd := exec.CommandContext(ctx, parts[0], parts[1:]...)
+	cmd := exec.CommandContext(commandCtx, parts[0], parts[1:]...)
 	output, err := cmd.CombinedOutput()
 
-	if ctx.Err() == context.DeadlineExceeded {
-		return string(output), fmt.Errorf("command timed out after %d seconds", timeoutSeconds)
+	if errors.Is(commandCtx.Err(), context.Canceled) {
+		return string(output), context.Canceled
+	}
+	if errors.Is(commandCtx.Err(), context.DeadlineExceeded) {
+		return string(output), fmt.Errorf(
+			"command timed out: %w",
+			context.DeadlineExceeded,
+		)
 	}
 	if err != nil {
 		return string(output), fmt.Errorf("command failed: %w", err)

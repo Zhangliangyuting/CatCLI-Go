@@ -3,6 +3,12 @@ openai_compatible:
   base_url: https://api.deepseek.com
   model: deepseek-v4-pro
 
+agent:
+  max_replan_attempts: 3
+  max_workers: 3
+  task_timeout: 5m
+  plan_timeout: 30m
+
 providers:
   enabled:
     - builtin

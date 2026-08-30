@@ -1,5 +1,7 @@
 package agent
 
+import "context"
+
 type Agent interface {
-	Run(userInput string) (string, error)
+	Run(ctx context.Context, userInput string) (string, error)
 }

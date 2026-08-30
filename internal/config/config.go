@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/joho/godotenv"
 	"github.com/spf13/viper"
@@ -13,6 +14,7 @@ import (
 type Config struct {
 	ConfigFile       string                 `mapstructure:"-"`
 	OpenAICompatible OpenAICompatibleConfig `mapstructure:"openai_compatible"`
+	Agent            AgentConfig            `mapstructure:"agent"`
 	Providers        ProvidersConfig        `mapstructure:"providers"`
 	Tools            ToolsConfig            `mapstructure:"tools"`
 }
@@ -21,6 +23,13 @@ type OpenAICompatibleConfig struct {
 	APIKey  string `mapstructure:"api_key"`
 	BaseURL string `mapstructure:"base_url"`
 	Model   string `mapstructure:"model"`
+}
+
+type AgentConfig struct {
+	MaxReplanAttempts int           `mapstructure:"max_replan_attempts"`
+	MaxWorkers        int           `mapstructure:"max_workers"`
+	TaskTimeout       time.Duration `mapstructure:"task_timeout"`
+	PlanTimeout       time.Duration `mapstructure:"plan_timeout"`
 }
 
 type ProvidersConfig struct {
@@ -92,6 +101,12 @@ func defaultConfig() Config {
 			BaseURL: "https://open.bigmodel.cn/api/paas/v4",
 			Model:   "glm-5.1",
 		},
+		Agent: AgentConfig{
+			MaxReplanAttempts: 3,
+			MaxWorkers:        3,
+			TaskTimeout:       5 * time.Minute,
+			PlanTimeout:       30 * time.Minute,
+		},
 		Providers: ProvidersConfig{
 			Enabled: []string{"builtin"},
 		},
@@ -108,6 +123,10 @@ func defaultConfig() Config {
 func setDefaults(v *viper.Viper, cfg Config) {
 	v.SetDefault("openai_compatible.base_url", cfg.OpenAICompatible.BaseURL)
 	v.SetDefault("openai_compatible.model", cfg.OpenAICompatible.Model)
+	v.SetDefault("agent.max_replan_attempts", cfg.Agent.MaxReplanAttempts)
+	v.SetDefault("agent.max_workers", cfg.Agent.MaxWorkers)
+	v.SetDefault("agent.task_timeout", cfg.Agent.TaskTimeout)
+	v.SetDefault("agent.plan_timeout", cfg.Agent.PlanTimeout)
 	v.SetDefault("tools.enabled", cfg.Tools.Enabled)
 	v.SetDefault("providers.enabled", cfg.Providers.Enabled)
 }
@@ -115,6 +134,21 @@ func setDefaults(v *viper.Viper, cfg Config) {
 func (c Config) validate() error {
 	if c.OpenAICompatible.APIKey == "" {
 		return errors.New("openai_compatible.api_key is required")
+	}
+	if c.Agent.MaxReplanAttempts < 0 {
+		return errors.New("agent.max_replan_attempts must not be negative")
+	}
+	if c.Agent.MaxWorkers < 1 {
+		return errors.New("agent.max_workers must be positive")
+	}
+	if c.Agent.TaskTimeout <= 0 {
+		return errors.New("agent.task_timeout must be positive")
+	}
+	if c.Agent.PlanTimeout <= 0 {
+		return errors.New("agent.plan_timeout must be positive")
+	}
+	if c.Agent.PlanTimeout < c.Agent.TaskTimeout {
+		return errors.New("agent.plan_timeout must not be shorter than agent.task_timeout")
 	}
 	return nil
 }

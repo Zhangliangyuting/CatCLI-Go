@@ -17,7 +17,7 @@
 ```text
 internal/plan/plan_generator_test.go
 internal/plan/plan_test.go
-internal/agent/plan_execute_agent_test.go
+internal/agent/plan_workflow_test.go
 ```
 
 测试文件与被测试代码放在同一个包中，便于测试 `parsePlan`、`buildTaskPrompt` 等未导出函数。

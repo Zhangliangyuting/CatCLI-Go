@@ -3,6 +3,7 @@ package llm
 import (
 	"AgentCLI/internal/tool"
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -65,6 +66,14 @@ type ChatResult struct {
 }
 
 func (c *OpenAICompatibleClient) Chat(messages []Message, toolDefinitions []tool.Definition) (ChatResult, error) {
+	return c.ChatContext(context.Background(), messages, toolDefinitions)
+}
+
+func (c *OpenAICompatibleClient) ChatContext(
+	ctx context.Context,
+	messages []Message,
+	toolDefinitions []tool.Definition,
+) (ChatResult, error) {
 	if c.APIKey == "" {
 		return ChatResult{}, fmt.Errorf("api key is empty")
 	}
@@ -81,7 +90,12 @@ func (c *OpenAICompatibleClient) Chat(messages []Message, toolDefinitions []tool
 	}
 
 	url := strings.TrimRight(c.BaseURL, "/") + "/chat/completions"
-	req, err := http.NewRequest(http.MethodPost, url, bytes.NewReader(requestBody))
+	req, err := http.NewRequestWithContext(
+		ctx,
+		http.MethodPost,
+		url,
+		bytes.NewReader(requestBody),
+	)
 	if err != nil {
 		return ChatResult{}, fmt.Errorf("failed to create request: %w", err)
 	}

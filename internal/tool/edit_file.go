@@ -1,6 +1,7 @@
 package tool
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"strings"
@@ -38,7 +39,14 @@ func EditFileDefinition() Definition {
 	}
 }
 
-func EditFileHandler(args map[string]interface{}) (string, error) {
+func EditFileHandler(
+	ctx context.Context,
+	args map[string]interface{},
+) (string, error) {
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
+
 	filePath, ok := args["file_path"].(string)
 	if !ok || filePath == "" {
 		return "", fmt.Errorf("file_path is required")
@@ -57,6 +65,15 @@ func EditFileHandler(args map[string]interface{}) (string, error) {
 	replaceAll := false
 	if value, ok := args["replace_all"].(bool); ok {
 		replaceAll = value
+	}
+
+	// The lock covers the complete read-modify-write transaction. Locking only
+	// os.WriteFile would still allow two editors to calculate from stale data.
+	unlock := fileLocks.lock(filePath)
+	defer unlock()
+
+	if err := ctx.Err(); err != nil {
+		return "", err
 	}
 
 	data, err := os.ReadFile(filePath)
@@ -79,6 +96,9 @@ func EditFileHandler(args map[string]interface{}) (string, error) {
 		updated = strings.ReplaceAll(content, oldString, newString)
 	} else {
 		updated = strings.Replace(content, oldString, newString, 1)
+	}
+	if err := ctx.Err(); err != nil {
+		return "", err
 	}
 
 	if err := os.WriteFile(filePath, []byte(updated), 0644); err != nil {

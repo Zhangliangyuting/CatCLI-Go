@@ -2,6 +2,7 @@ package plan
 
 import (
 	"AgentCLI/internal/llm"
+	"context"
 	"encoding/json"
 	"fmt"
 	"strings"
@@ -19,7 +20,9 @@ const PLANNING_PROMPT = `
 				"name": "子任务名称",
 				"description": "子任务描述",
 				"type": "子任务类型",
-				"dependencies": []
+				"dependencies": [],
+				"read_resources": ["需要读取的文件路径"],
+				"write_resources": ["需要修改的文件路径"]
 			}
 		],
 		"summary": "任务摘要"
@@ -39,11 +42,24 @@ const PLANNING_PROMPT = `
 	2. dependencies列出依赖的任务id
 	3. 任务应该按执行顺序排列
 	4. 任务描述要具体明确
-	5. 复杂任务拆分为5-10个子任务
+	5. read_resources 和 write_resources 使用工作区相对路径；无法提前确定时使用空数组
+	6. 会修改同一资源，或一方读取而另一方修改同一资源的任务，不应并行执行
+	任务拆分规则：
+		1. 简单任务拆分为 1-3 个子任务。
+		2. 中等任务拆分为 3-5 个子任务。
+		3. 只有复杂任务才拆分为 5-10 个子任务。
+		4. 不要为检查目录、创建目录、验证简单输出等操作单独创建任务，
+		除非它们具有独立价值。
+		5. 可以在一次工具调用或同一执行上下文完成的操作，应尽量合并。
+		6. 避免生成重复的检查和验证任务。
 `
 
 type PlanGenerator interface {
-	Generate(userInput string) (*Plan, error)
+	Generate(ctx context.Context, userInput string) (*Plan, error)
+	// 用户在执行前主动修改计划
+	Revise(ctx context.Context, currentPlan *Plan, feedback string) (*Plan, error)
+	// 执行失败后的自动重新规划
+	Replan(ctx context.Context, failedPlan *Plan, failureReason string) (*Plan, error)
 }
 
 type LLMPlanGenerator struct {
@@ -59,6 +75,7 @@ func NewLLMPlanGenerator(
 }
 
 func (g *LLMPlanGenerator) Generate(
+	ctx context.Context,
 	userInput string,
 ) (*Plan, error) {
 	messages := []llm.Message{
@@ -66,7 +83,7 @@ func (g *LLMPlanGenerator) Generate(
 		llm.UserMessage(userInput),
 	}
 
-	result, err := g.client.Chat(messages, nil)
+	result, err := g.client.ChatContext(ctx, messages, nil)
 	if err != nil {
 		return nil, fmt.Errorf("generate plan: %w", err)
 	}
@@ -91,8 +108,7 @@ func parsePlan(planJSON string) (*Plan, error) {
 		return nil, fmt.Errorf("plan has no tasks")
 	}
 
-	plan := NewPlan(generatePlanID(), raw.Goal)
-	plan.WriteSummary(raw.Summary)
+	plan := NewPlan(generatePlanID(), raw.Goal, raw.Summary)
 
 	idMapping := make(map[string]string)
 
@@ -120,6 +136,7 @@ func parsePlan(planJSON string) (*Plan, error) {
 			rt.Type,
 			[]string{},
 		)
+		task.SetResources(rt.ReadResources, rt.WriteResources)
 
 		if err := plan.AddTask(task); err != nil {
 			return nil, err
@@ -180,15 +197,20 @@ func generatePlanID() string {
 	return fmt.Sprintf("plan_%d", time.Now().UnixNano())
 }
 
-func (g *LLMPlanGenerator) Replan(failedPlan *Plan, failureReason string) (*Plan, error) {
-	context := buildReplanContext(failedPlan, failureReason)
-	return g.Generate(context)
+func (g *LLMPlanGenerator) Replan(
+	ctx context.Context,
+	failedPlan *Plan,
+	failureReason string,
+) (*Plan, error) {
+	replanContext := buildReplanContext(failedPlan, failureReason)
+	return g.Generate(ctx, replanContext)
 }
 
 func buildReplanContext(failedPlan *Plan, failureReason string) string {
 	var context strings.Builder
 
 	fmt.Fprintf(&context, "原始目标：\n%s\n\n", failedPlan.Goal())
+	fmt.Fprintf(&context, "原计划摘要：\n%s\n\n", failedPlan.Summary())
 
 	context.WriteString("已完成任务：\n")
 
@@ -249,6 +271,58 @@ func buildReplanContext(failedPlan *Plan, failureReason string) string {
 3. 利用已完成任务的执行结果。
 4. 针对失败原因调整后续任务。
 5. 只规划尚未完成的工作。
+`)
+
+	return context.String()
+}
+
+func (g *LLMPlanGenerator) Revise(
+	ctx context.Context,
+	currentPlan *Plan,
+	feedback string,
+) (*Plan, error) {
+	revisionContext := buildRevisionContext(currentPlan, feedback)
+	return g.Generate(ctx, revisionContext)
+}
+
+func buildRevisionContext(
+	currentPlan *Plan,
+	feedback string,
+) string {
+	var context strings.Builder
+
+	fmt.Fprintf(&context, "原始目标：\n%s\n\n", currentPlan.Goal())
+	fmt.Fprintf(&context, "当前计划摘要：\n%s\n\n", currentPlan.Summary())
+	context.WriteString("当前计划任务：\n")
+
+	for _, taskID := range currentPlan.ExecutionOrder() {
+		task, ok := currentPlan.TaskByID(taskID)
+		if !ok {
+			continue
+		}
+
+		fmt.Fprintf(
+			&context,
+			"- %s：%s\n  类型：%s\n  依赖：%s\n  读取资源：%s\n  写入资源：%s\n",
+			task.Name(),
+			task.Description(),
+			task.Type(),
+			strings.Join(task.Dependencies(), ", "),
+			strings.Join(task.ReadResources(), ", "),
+			strings.Join(task.WriteResources(), ", "),
+		)
+	}
+
+	fmt.Fprintf(&context, "\n用户修改意见：\n%s\n", feedback)
+
+	context.WriteString(`
+请根据用户意见生成一份完整的新计划。
+
+要求：
+1. 保持原始目标不变。
+2. 根据用户意见调整任务。
+3. 此计划尚未开始执行，不要描述任务执行结果。
+4. 输出完整计划，而不是只输出变化部分。
 `)
 
 	return context.String()
