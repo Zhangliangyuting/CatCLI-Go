@@ -43,6 +43,23 @@ type ChatRequest struct {
 	Model           string            `json:"model"`
 	Messages        []Message         `json:"messages"`
 	ToolDefinitions []tool.Definition `json:"tools,omitempty"`
+	MaxTokens       int               `json:"max_tokens,omitempty"`
+	ResponseFormat  *ResponseFormat   `json:"response_format,omitempty"`
+	Thinking        *ThinkingConfig   `json:"thinking,omitempty"`
+}
+
+type ResponseFormat struct {
+	Type string `json:"type"`
+}
+
+type ThinkingConfig struct {
+	Type string `json:"type"`
+}
+
+type ChatOptions struct {
+	MaxTokens      int
+	ResponseFormat *ResponseFormat
+	Thinking       *ThinkingConfig
 }
 
 type ChatResponse struct {
@@ -51,7 +68,8 @@ type ChatResponse struct {
 }
 
 type Choice struct {
-	Message Message `json:"message"`
+	Message      Message `json:"message"`
+	FinishReason string  `json:"finish_reason"`
 }
 
 type Usage struct {
@@ -61,8 +79,9 @@ type Usage struct {
 }
 
 type ChatResult struct {
-	Message Message
-	Usage   Usage
+	Message      Message
+	Usage        Usage
+	FinishReason string
 }
 
 func (c *OpenAICompatibleClient) Chat(messages []Message, toolDefinitions []tool.Definition) (ChatResult, error) {
@@ -74,14 +93,25 @@ func (c *OpenAICompatibleClient) ChatContext(
 	messages []Message,
 	toolDefinitions []tool.Definition,
 ) (ChatResult, error) {
+	return c.ChatContextWithOptions(ctx, messages, toolDefinitions, ChatOptions{})
+}
+
+func (c *OpenAICompatibleClient) ChatContextWithOptions(
+	ctx context.Context,
+	messages []Message,
+	toolDefinitions []tool.Definition,
+	options ChatOptions,
+) (ChatResult, error) {
 	if c.APIKey == "" {
 		return ChatResult{}, fmt.Errorf("api key is empty")
 	}
-
 	chatRequest := ChatRequest{
 		Model:           c.Model,
 		Messages:        messages,
 		ToolDefinitions: toolDefinitions,
+		MaxTokens:       options.MaxTokens,
+		ResponseFormat:  options.ResponseFormat,
+		Thinking:        options.Thinking,
 	}
 
 	requestBody, err := json.Marshal(chatRequest)
@@ -129,8 +159,9 @@ func (c *OpenAICompatibleClient) ChatContext(
 	}
 
 	return ChatResult{
-		Message: chatResponse.Choices[0].Message,
-		Usage:   chatResponse.Usage,
+		Message:      chatResponse.Choices[0].Message,
+		Usage:        chatResponse.Usage,
+		FinishReason: chatResponse.Choices[0].FinishReason,
 	}, nil
 
 }

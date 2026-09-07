@@ -20,9 +20,13 @@ type Config struct {
 }
 
 type OpenAICompatibleConfig struct {
-	APIKey  string `mapstructure:"api_key"`
-	BaseURL string `mapstructure:"base_url"`
-	Model   string `mapstructure:"model"`
+	APIKey              string `mapstructure:"api_key"`
+	BaseURL             string `mapstructure:"base_url"`
+	Model               string `mapstructure:"model"`
+	ContextWindowTokens int    `mapstructure:"context_window_tokens"`
+	MaxOutputTokens     int    `mapstructure:"max_output_tokens"`
+	OutputReserveTokens int    `mapstructure:"output_reserve_tokens"`
+	CompactionMaxTokens int    `mapstructure:"compaction_max_tokens"`
 }
 
 type AgentConfig struct {
@@ -70,6 +74,18 @@ func Load() (Config, error) {
 	if err := v.BindEnv("openai_compatible.model"); err != nil {
 		return Config{}, err
 	}
+	if err := v.BindEnv("openai_compatible.context_window_tokens"); err != nil {
+		return Config{}, err
+	}
+	if err := v.BindEnv("openai_compatible.max_output_tokens"); err != nil {
+		return Config{}, err
+	}
+	if err := v.BindEnv("openai_compatible.output_reserve_tokens"); err != nil {
+		return Config{}, err
+	}
+	if err := v.BindEnv("openai_compatible.compaction_max_tokens"); err != nil {
+		return Config{}, err
+	}
 
 	//查找并解析yaml文件
 	if err := v.ReadInConfig(); err != nil {
@@ -79,6 +95,9 @@ func Load() (Config, error) {
 	}
 
 	if err := v.Unmarshal(&cfg); err != nil {
+		return Config{}, err
+	}
+	if err := cfg.OpenAICompatible.resolveModelLimits(); err != nil {
 		return Config{}, err
 	}
 	if err := cfg.validate(); err != nil {
@@ -98,8 +117,8 @@ func Load() (Config, error) {
 func defaultConfig() Config {
 	return Config{
 		OpenAICompatible: OpenAICompatibleConfig{
-			BaseURL: "https://open.bigmodel.cn/api/paas/v4",
-			Model:   "glm-5.1",
+			BaseURL: "https://api.deepseek.com",
+			Model:   "deepseek-v4-pro",
 		},
 		Agent: AgentConfig{
 			MaxReplanAttempts: 3,
@@ -123,6 +142,10 @@ func defaultConfig() Config {
 func setDefaults(v *viper.Viper, cfg Config) {
 	v.SetDefault("openai_compatible.base_url", cfg.OpenAICompatible.BaseURL)
 	v.SetDefault("openai_compatible.model", cfg.OpenAICompatible.Model)
+	v.SetDefault("openai_compatible.context_window_tokens", cfg.OpenAICompatible.ContextWindowTokens)
+	v.SetDefault("openai_compatible.max_output_tokens", cfg.OpenAICompatible.MaxOutputTokens)
+	v.SetDefault("openai_compatible.output_reserve_tokens", cfg.OpenAICompatible.OutputReserveTokens)
+	v.SetDefault("openai_compatible.compaction_max_tokens", cfg.OpenAICompatible.CompactionMaxTokens)
 	v.SetDefault("agent.max_replan_attempts", cfg.Agent.MaxReplanAttempts)
 	v.SetDefault("agent.max_workers", cfg.Agent.MaxWorkers)
 	v.SetDefault("agent.task_timeout", cfg.Agent.TaskTimeout)
@@ -134,6 +157,30 @@ func setDefaults(v *viper.Viper, cfg Config) {
 func (c Config) validate() error {
 	if c.OpenAICompatible.APIKey == "" {
 		return errors.New("openai_compatible.api_key is required")
+	}
+	if c.OpenAICompatible.ContextWindowTokens <= 0 {
+		return errors.New("openai_compatible.context_window_tokens must be positive")
+	}
+	if c.OpenAICompatible.MaxOutputTokens <= 0 {
+		return errors.New("openai_compatible.max_output_tokens must be positive")
+	}
+	if c.OpenAICompatible.MaxOutputTokens > c.OpenAICompatible.ContextWindowTokens {
+		return errors.New("openai_compatible.max_output_tokens must not exceed context_window_tokens")
+	}
+	if c.OpenAICompatible.OutputReserveTokens <= 0 {
+		return errors.New("openai_compatible.output_reserve_tokens must be positive")
+	}
+	if c.OpenAICompatible.OutputReserveTokens > c.OpenAICompatible.MaxOutputTokens {
+		return errors.New("openai_compatible.output_reserve_tokens must not exceed max_output_tokens")
+	}
+	if c.OpenAICompatible.CompactionMaxTokens <= 0 {
+		return errors.New("openai_compatible.compaction_max_tokens must be positive")
+	}
+	if c.OpenAICompatible.CompactionMaxTokens > c.OpenAICompatible.MaxOutputTokens {
+		return errors.New("openai_compatible.compaction_max_tokens must not exceed max_output_tokens")
+	}
+	if c.OpenAICompatible.UsableInputTokens() <= 0 {
+		return errors.New("openai_compatible.output_reserve_tokens must be smaller than context_window_tokens")
 	}
 	if c.Agent.MaxReplanAttempts < 0 {
 		return errors.New("agent.max_replan_attempts must not be negative")

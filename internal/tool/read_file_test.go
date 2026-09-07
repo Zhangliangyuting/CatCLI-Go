@@ -69,3 +69,32 @@ func TestReadFileHandlerRejectsOversizedFile(t *testing.T) {
 		t.Fatalf("ReadFileHandler() error = %v, want file-size error", err)
 	}
 }
+
+func TestReadFileHandlerPaginatesLargeText(t *testing.T) {
+	filePath := filepath.Join(t.TempDir(), "large-text.txt")
+	data := bytes.Repeat([]byte("a"), 20*1024)
+	if err := os.WriteFile(filePath, data, 0644); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+
+	first, err := ReadFileHandler(context.Background(), map[string]interface{}{
+		"path": filePath,
+	})
+	if err != nil {
+		t.Fatalf("first ReadFileHandler() error = %v", err)
+	}
+	if !strings.Contains(first, "continue with offset=16384") {
+		t.Fatalf("first page does not contain next offset: %q", first[len(first)-100:])
+	}
+
+	second, err := ReadFileHandler(context.Background(), map[string]interface{}{
+		"path":   filePath,
+		"offset": float64(defaultReadChunkBytes),
+	})
+	if err != nil {
+		t.Fatalf("second ReadFileHandler() error = %v", err)
+	}
+	if second != string(data[defaultReadChunkBytes:]) {
+		t.Fatalf("second page length = %d, want %d", len(second), len(data)-defaultReadChunkBytes)
+	}
+}

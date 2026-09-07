@@ -12,6 +12,7 @@ This project is intentionally minimal. It is a first step from zero to a working
 - Plan generation with dependency-aware parallel execution
 - Task- and plan-level timeout and cancellation propagation
 - Structured execution events for CLI output and observers
+- Concurrent in-memory storage with typed entries and token-budget selection
 - Scheduler resource conflict detection and per-file read/write locks
 - Config-driven provider and tool registration
 - Built-in file and command tools with safety checks
@@ -49,6 +50,10 @@ openai_compatible:
   api_key: your-api-key
   base_url: https://api.deepseek.com
   model: deepseek-v4-pro
+  context_window_tokens: 0
+  max_output_tokens: 0
+  output_reserve_tokens: 32768
+  compaction_max_tokens: 4096
 
 agent:
   max_replan_attempts: 3
@@ -76,7 +81,11 @@ The app loads `.env` automatically and also supports environment variables using
 export CATCLI_OPENAI_COMPATIBLE_API_KEY=your-api-key
 export CATCLI_OPENAI_COMPATIBLE_BASE_URL=https://api.deepseek.com
 export CATCLI_OPENAI_COMPATIBLE_MODEL=deepseek-v4-pro
+# Optional: reopen a previously printed conversation ID.
+export CATCLI_CONVERSATION_ID=0123456789abcdef0123456789abcdef
 ```
+
+`context_window_tokens` and `max_output_tokens` use the built-in model table when set to `0`; a positive value overrides the table for the selected provider. `output_reserve_tokens` is used only to calculate the usable memory input budget (`context_window_tokens - output_reserve_tokens`) and is not sent to the API. Normal answers do not set `max_tokens`. `compaction_max_tokens` is sent only for structured Micro, Session, and Full compaction requests. The built-in table currently covers the DeepSeek V4 Flash, V4 Pro, and V4 Flash Vision model IDs.
 
 For a minimal local setup, use `config/config.yaml` for provider and tool settings, and `.env` for API credentials.
 
@@ -243,6 +252,7 @@ The main helper modules are:
 | `internal/agent/event.go` | Defines structured Agent, Task, Plan, Tool, and token events | `SynchronizedObserver` serializes events from concurrent workers |
 | `internal/agent/plan_scheduler.go` | Runs the bounded worker pool and dynamically releases dependency-ready tasks | Enforces worker limits, task timeouts, cancellation, fail-fast, and worker shutdown |
 | `internal/agent/resource_tracker.go` | Tracks resources held by running tasks | Allows read/read concurrency and blocks read/write or write/write conflicts |
+| `internal/memory/manager.go` | Stores typed memory entries and selects recent context within a token budget | Uses immutable entry values, defensive metadata copies, unique IDs, and synchronization |
 | `internal/tool/tool_registry.go` | Registers enabled tools and dispatches LLM tool calls | Rejects unknown tools and propagates `context.Context` into handlers |
 | `internal/tool/file_lock.go` | Maintains one `sync.RWMutex` per normalized file path | Serializes actual file writes without blocking unrelated files |
 | `internal/plan/visualizer.go` | Renders plan status, progress, dependencies, and resources | Makes the generated plan inspectable before and during execution |
@@ -291,6 +301,32 @@ The ReAct agent keeps calling the model while the model requests tools. Tool res
 
 There is currently no fixed step limit. If the model keeps requesting tools indefinitely, stop the CLI with `Ctrl+C`.
 
+## Memory Manager
+
+`internal/memory` provides the storage layer for context management. An entry has an immutable ID, content, type, UTC timestamp, typed protocol metadata, optional string attributes, and token count. Supported types are `CONVERSATION`, `FACT`, `SUMMARY`, and `TOOL_RESULT`.
+
+The manager is safe for concurrent use, calculates token counts when entries are added, supports loading pre-built entries, type filtering, removal and clearing, and can select the newest complete entries that fit a token budget while returning them in chronological order. Its default token counter is only an estimate; callers can inject a model-specific tokenizer. Conversation entries preserve roles and assistant tool calls, while tool-result entries preserve tool names and tool-call IDs. Protected facts are stored separately from compressible conversation entries, use stable keys for ordered upserts, and are merged into one system message when context is reconstructed.
+
+Facts have `SESSION`, `PROJECT`, and `USER` scopes. Session facts protect constraints for the current task and are removed by `clear`; project and user facts survive ordinary history clearing. `MarkdownFactStore` persists project and user facts in editable Markdown, while session facts are deliberately rejected by the store. Construct a manager with `NewManagerWithFactStore` to load durable facts and keep later upserts/removals synchronized with `.catcli/memory/project.md` and `.catcli/memory/user.md`. `ClearAll` clears the manager's in-memory view but deliberately does not erase those durable files.
+
+The CLI wraps both its main ReAct and Plan agents with `FactAwareAgent`. A local rule gate looks for explicit memory intent such as “remember”, “以后”, “默认”, preferences, or project conventions. Messages that do not match make no extra model request. Matching messages are sent to `LLMFactExtractor` in JSON mode, which proposes validated `UPSERT` or `REMOVE` operations with a scope, stable key, and content. The program applies those operations before running the selected agent and emits a `memory_fact` event. Extraction or persistence failure stops that request, so a model cannot claim it remembered something that was not stored. Plan task agents do not extract facts again; the original Plan request is handled once by the main wrapper.
+
+`JSONLTranscriptStore` appends every immutable protocol entry to one `.jsonl` file per conversation and restores them in order without dropping message roles, assistant tool calls, tool-call IDs, metadata, timestamps, or token counts. Appends are idempotent by entry ID, including after a restart, so a compactor can defensively archive an already-recorded source without duplicating it. A typical root is `.catcli/transcripts`; the conversation ID is restricted to letters, digits, `-`, and `_` so it cannot escape that directory. The transcript store is separate from active context: the transcript remains a complete audit log while the manager keeps only summaries and recent entries sent to the model.
+
+`JSONConversationStore` provides resumable per-window checkpoints at `.catcli/conversations/<conversationID>/state.json`. The state contains the manager's current conversation entries—including summaries—and SESSION facts. `Manager.SaveConversation` creates an atomic checkpoint; `Manager.LoadConversation` restores it atomically into `entries` and session-scoped `facts` while retaining PROJECT and USER facts loaded through `FactStore`. A missing conversation is reported separately from an existing empty conversation.
+
+Compaction uses two validated content schemas. `ToolResultCompactContent` is the MicroCompact output and is rendered back into a `TOOL_RESULT` entry so its tool-call protocol fields remain intact. `SummaryContent` is shared by Session and Full compaction and always renders fixed sections for the goal, user requirements, decisions, completed work, current state, pending work, important files, errors, fact references, and continuation. `Metadata.Compaction.Kind` distinguishes `MICRO`, `SESSION`, and `FULL` outputs and records their source entry IDs and original token count.
+
+`Compactor` implements all three replacement operations. `MicroCompact` targets one original tool result; `SessionCompact` selects the oldest four complete user turns after the latest summary; `FullCompact` merges the safe historical prefix—including older summaries—while retaining the most recent user turn verbatim. Tool-call groups are protocol-validated before selection. The generated output must reduce token count, all source entries are appended to `TranscriptStore`, and `Manager.ReplaceEntries` then applies the replacement atomically. An archive failure, malformed model response, incomplete tool group, concurrent source change, or non-reducing result leaves active memory unchanged. `LLMCompactionGenerator` supplies production JSON prompts through the existing OpenAI-compatible client.
+
+`CompactionScheduler` applies the token policy incrementally. Below 60% usage it does nothing. From 60% to 75% it MicroCompacts the largest eligible original tool result. From 75% to 85% it runs SessionCompact only when replacing the next four complete turns is estimated to reduce total usage to at most 65%. At 85% it goes directly to FullCompact instead of first producing a Session summary. At 95% the decision is marked emergency; if no historical prefix is safe for FullCompact, the scheduler attempts MicroCompact on the largest eligible tool result. Before one model request, `CompactToFit` performs at most three reducing operations, re-measures after each one, and stops early at the 65% low-water mark. If protected/current context still exceeds the hard input budget, it returns `ContextBudgetExceededError`; the request is not sent and no content is silently truncated.
+
+A structurally valid compaction can still be larger than its source. `Compactor` reports that case as `CompactionNotReducingError` without archiving or changing active memory. The scheduler emits a `SKIP` decision, remembers the rejected ToolResult ID, and tries the next-largest eligible ToolResult. After two ineffective Micro candidates it tries FullCompact; an ineffective FullCompact falls back to remaining Micro candidates. Retries are bounded. If no strategy reduces the complete request but it still fits the hard input budget, the original request proceeds unchanged; only a request that remains over the hard budget ends with `ContextBudgetExceededError`.
+
+`ReActAgent` now stores its short-term conversation through the memory manager and records every user, assistant, and tool message in the transcript. Before every model request it estimates the complete logical input—including the system prompt, facts, conversation entries, tool calls, and tool definitions—and passes that measurement to `CompactToFitMeasured`. The scheduler uses the complete request estimate for thresholds and the hard input limit, re-measuring after every compaction; per-entry token counts remain responsible for candidate selection and replacement checks. After a successful request, the shared `CalibratedRequestTokenEstimator` compares its estimate with the provider's `usage.prompt_tokens` and gradually corrects later estimates while retaining a safety margin. Token events display both `estimated_input` and the actual `input`. A scheduling or hard-budget failure prevents the request from being sent. The CLI saves active state after every turn and prints the generated conversation ID. Set `CATCLI_CONVERSATION_ID` to that ID on a later launch to restore its entries, summaries, and session facts. The system prompt remains agent configuration rather than mutable conversation memory, and `clear` removes all managed conversation entries and checkpoints the cleared state.
+
+Plan execution is wrapped by `MemoryAwarePlanAgent`. Planning receives the root facts, summaries, and conversation history, applies the root compaction budget before generation, and writes the current request and final plan result back to the root Manager and transcript. The task-aware factory still gives every task a fresh Manager and its own CompactionScheduler, so concurrently running tasks cannot mix short-term context or mutate the main conversation; each task Manager starts with a snapshot of all SESSION, PROJECT, and USER facts. Task messages use a derived `<conversationID>-task-<sequence>-<taskHash>` transcript ID. Task state remains ephemeral and is not written to the main conversation checkpoint; the combined plan result is recorded in the root conversation.
+
 ## Built-in Tools
 
 The `builtin` provider currently exposes these tools:
@@ -338,6 +374,7 @@ internal/agent/             Agent interface, ReAct loop, and plan executor
 internal/cli/               Reusable CLI-specific implementations
 internal/config/            Viper-based config loading
 internal/llm/               OpenAI-compatible chat client
+internal/memory/            Typed memory entries, token counting, and in-memory management
 internal/plan/              Plan generation, task state, dependency ordering, visualization
 internal/routing/           Hybrid ReAct/Plan mode selection
 internal/tool/              Tool definitions, handlers, providers, registry

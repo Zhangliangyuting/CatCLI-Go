@@ -8,21 +8,23 @@ import (
 type EventType string
 
 const (
-	EventTokenUsage     EventType = "token_usage"
-	EventToolCall       EventType = "tool_call"
-	EventToolResult     EventType = "tool_result"
-	EventTaskStarted    EventType = "task_started"
-	EventTaskCompleted  EventType = "task_completed"
-	EventTaskFailed     EventType = "task_failed"
-	EventTaskCancelled  EventType = "task_cancelled"
-	EventTaskTimeout    EventType = "task_timeout"
-	EventPlanGenerated  EventType = "plan_generated"
-	EventPlanRevised    EventType = "plan_revised"
-	EventPlanCancelled  EventType = "plan_cancelled"
-	EventPlanReplanning EventType = "plan_replanning"
-	EventPlanCompleted  EventType = "plan_completed"
-	EventPlanFailed     EventType = "plan_failed"
-	EventPlanTimeout    EventType = "plan_timeout"
+	EventTokenUsage       EventType = "token_usage"
+	EventMemoryCompaction EventType = "memory_compaction"
+	EventMemoryFact       EventType = "memory_fact"
+	EventToolCall         EventType = "tool_call"
+	EventToolResult       EventType = "tool_result"
+	EventTaskStarted      EventType = "task_started"
+	EventTaskCompleted    EventType = "task_completed"
+	EventTaskFailed       EventType = "task_failed"
+	EventTaskCancelled    EventType = "task_cancelled"
+	EventTaskTimeout      EventType = "task_timeout"
+	EventPlanGenerated    EventType = "plan_generated"
+	EventPlanRevised      EventType = "plan_revised"
+	EventPlanCancelled    EventType = "plan_cancelled"
+	EventPlanReplanning   EventType = "plan_replanning"
+	EventPlanCompleted    EventType = "plan_completed"
+	EventPlanFailed       EventType = "plan_failed"
+	EventPlanTimeout      EventType = "plan_timeout"
 )
 
 type Event struct {

@@ -38,6 +38,27 @@ func NewPlanAndExecuteAgent(
 	}
 }
 
+// NewPlanAndExecuteAgentWithTaskFactory is the memory-aware constructor. It
+// provides the task ID while creating each executor, allowing every task to
+// receive an isolated Manager, compaction scheduler, and transcript namespace.
+func NewPlanAndExecuteAgentWithTaskFactory(
+	planner plan.PlanGenerator,
+	executor TaskAgentFactory,
+	reviewer PlanReviewer,
+	maxReplanAttempts int,
+	maxWorkers int,
+	taskTimeout time.Duration,
+	planTimeout time.Duration,
+) *PlanAndExecuteAgent {
+	return &PlanAndExecuteAgent{
+		planner:           planner,
+		reviewer:          reviewer,
+		scheduler:         newPlanSchedulerWithTaskFactory(maxWorkers, taskTimeout, executor),
+		maxReplanAttempts: maxReplanAttempts,
+		planTimeout:       planTimeout,
+	}
+}
+
 func (a *PlanAndExecuteAgent) Run(
 	ctx context.Context,
 	input string,
