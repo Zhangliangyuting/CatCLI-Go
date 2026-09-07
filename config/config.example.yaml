@@ -2,6 +2,13 @@ openai_compatible:
   api_key: your-api-key
   base_url: https://api.deepseek.com
   model: deepseek-v4-pro
+  # 0 means: use the limits from the built-in model table.
+  context_window_tokens: 0
+  max_output_tokens: 0
+  # Reserved only when calculating the memory input budget; not sent to the API.
+  output_reserve_tokens: 32768
+  # Maximum output for structured Micro/Session/Full compaction requests.
+  compaction_max_tokens: 4096
 
 agent:
   max_replan_attempts: 3

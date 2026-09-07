@@ -13,8 +13,12 @@ import (
 type planScheduler struct {
 	maxWorkers      int
 	taskTimeout     time.Duration
-	executorFactory func() Agent
+	executorFactory TaskAgentFactory
 }
+
+// TaskAgentFactory creates an isolated executor for one plan task. Receiving
+// the task ID lets callers assign separate memory and transcript namespaces.
+type TaskAgentFactory func(taskID string) (Agent, error)
 
 type taskJob struct {
 	id     string
@@ -31,6 +35,20 @@ func newPlanScheduler(
 	maxWorkers int,
 	taskTimeout time.Duration,
 	executorFactory func() Agent,
+) *planScheduler {
+	return newPlanSchedulerWithTaskFactory(
+		maxWorkers,
+		taskTimeout,
+		func(string) (Agent, error) {
+			return executorFactory(), nil
+		},
+	)
+}
+
+func newPlanSchedulerWithTaskFactory(
+	maxWorkers int,
+	taskTimeout time.Duration,
+	executorFactory TaskAgentFactory,
 ) *planScheduler {
 	if maxWorkers < 1 {
 		maxWorkers = 1
@@ -316,12 +334,21 @@ func (s *planScheduler) runWorker(
 			taskCtx, cancel = context.WithTimeout(ctx, s.taskTimeout)
 		}
 
-		// 每个任务创建独立 Agent，避免共享 conversationHistory。
-		executor := s.executorFactory()
-
 		var result string
 		var err error
-		if observable, ok := executor.(ObservableAgent); ok {
+		// 每个任务创建独立 Agent，避免共享短期上下文。
+		var executor Agent
+		var factoryErr error
+		if s.executorFactory == nil {
+			factoryErr = fmt.Errorf("task agent factory is nil")
+		} else {
+			executor, factoryErr = s.executorFactory(job.id)
+		}
+		if factoryErr != nil {
+			err = fmt.Errorf("create task agent: %w", factoryErr)
+		} else if executor == nil {
+			err = fmt.Errorf("create task agent: factory returned nil")
+		} else if observable, ok := executor.(ObservableAgent); ok {
 			result, err = observable.RunWithObserver(
 				taskCtx,
 				job.prompt,

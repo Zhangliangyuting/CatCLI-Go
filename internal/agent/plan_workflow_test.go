@@ -97,6 +97,39 @@ func (f contextWorkflowExecutorFunc) Run(
 	return f(ctx, input)
 }
 
+func TestTaskAgentFactoryReceivesTaskID(t *testing.T) {
+	p := plan.NewPlan("plan_1", "任务工厂", "传递任务 ID")
+	if err := p.AddTask(plan.NewTask(
+		"task_memory",
+		"记忆任务",
+		"验证独立任务 Agent",
+		plan.ANALYSIS,
+		nil,
+	)); err != nil {
+		t.Fatalf("AddTask() error = %v", err)
+	}
+	if err := p.TopologicalSort(); err != nil {
+		t.Fatalf("TopologicalSort() error = %v", err)
+	}
+
+	var receivedTaskID string
+	scheduler := newPlanSchedulerWithTaskFactory(
+		1,
+		0,
+		func(taskID string) (Agent, error) {
+			receivedTaskID = taskID
+			return &workflowExecutor{result: "done"}, nil
+		},
+	)
+
+	if _, err := scheduler.Execute(context.Background(), p); err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	if receivedTaskID != "task_memory" {
+		t.Fatalf("task factory ID = %q, want task_memory", receivedTaskID)
+	}
+}
+
 func TestExecutePlanDynamicallySchedulesReadyTasks(t *testing.T) {
 	p := plan.NewPlan("plan_1", "动态执行", "测试动态调度")
 	for _, task := range []*plan.Task{
