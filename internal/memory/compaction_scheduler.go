@@ -25,6 +25,7 @@ const (
 	CompactionActionSession CompactionAction = "SESSION"
 	CompactionActionFull    CompactionAction = "FULL"
 	CompactionActionSkip    CompactionAction = "SKIP"
+	CompactionActionEvict   CompactionAction = "EVICT"
 )
 
 type CompactionSchedulerConfig struct {
@@ -99,6 +100,7 @@ type CompactionDecision struct {
 type CompactionScheduler struct {
 	compactor       *Compactor
 	config          CompactionSchedulerConfig
+	storageBudget   StorageBudget
 	skippedMu       sync.RWMutex
 	skippedMicroIDs map[string]struct{}
 }
@@ -139,6 +141,7 @@ func NewCompactionScheduler(
 	return &CompactionScheduler{
 		compactor:       compactor,
 		config:          config,
+		storageBudget:   DefaultStorageBudget(),
 		skippedMicroIDs: make(map[string]struct{}),
 	}, nil
 }
@@ -173,7 +176,10 @@ func (scheduler *CompactionScheduler) CompactToFitMeasured(
 		return nil, fmt.Errorf("context token measurer is nil")
 	}
 
-	decisions := make([]CompactionDecision, 0, scheduler.config.MaxCompactionsPerRequest)
+	decisions, err := scheduler.EnforceStorageBudget(ctx, manager)
+	if err != nil {
+		return decisions, err
+	}
 	successfulCompactions := 0
 	attempts := 0
 	attemptLimit := scheduler.config.MaxCompactionsPerRequest + extraStrategyAttempts

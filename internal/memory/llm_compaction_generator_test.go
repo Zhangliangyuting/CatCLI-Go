@@ -80,3 +80,33 @@ func TestLLMCompactionGeneratorRetriesEmptyContent(t *testing.T) {
 		t.Fatalf("complete() = (%q, requests=%d), want successful second response", content, requests)
 	}
 }
+
+func TestLLMCompactionGeneratorRetriesInvalidSummary(t *testing.T) {
+	requests := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		content := `{"goal":"restore context","current_state":[],"continuation":"continue"}`
+		if requests == 2 {
+			content = `{"goal":"restore context","current_state":["SQLite stores conversation snapshots"],"continuation":"continue"}`
+		}
+		_ = json.NewEncoder(w).Encode(llm.ChatResponse{Choices: []llm.Choice{{
+			Message: llm.AssistantMessage(content), FinishReason: "stop",
+		}}})
+	}))
+	defer server.Close()
+	client, err := llm.NewOpenAICompatibleClient("test-key", server.URL, "deepseek-v4-pro")
+	if err != nil {
+		t.Fatal(err)
+	}
+	generator, err := NewLLMCompactionGeneratorWithMaxTokens(client, 1024)
+	if err != nil {
+		t.Fatal(err)
+	}
+	content, err := generator.Summarize(context.Background(), CompactionFull, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if requests != 2 || len(content.CurrentState) != 1 {
+		t.Fatalf("requests=%d, content=%+v", requests, content)
+	}
+}

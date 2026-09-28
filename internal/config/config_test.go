@@ -1,6 +1,8 @@
 package config
 
 import (
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -107,5 +109,34 @@ func TestDefaultProviderMatchesDeepSeekConfiguration(t *testing.T) {
 	}
 	if cfg.OpenAICompatible.Model != "deepseek-v4-pro" {
 		t.Fatalf("default Model = %q, want deepseek-v4-pro", cfg.OpenAICompatible.Model)
+	}
+}
+
+func TestLoadEmbeddingFromYAMLWithEnvironmentOverride(t *testing.T) {
+	original, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	root := t.TempDir()
+	if err := os.Mkdir(filepath.Join(root, "config"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	yaml := "embedding:\n  model: bge-m3\n  base_url: http://localhost:11434/v1\n  api_key: ollama\n"
+	if err := os.WriteFile(filepath.Join(root, "config", "config.yaml"), []byte(yaml), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(root); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chdir(original) })
+	t.Setenv("CATCLI_OPENAI_COMPATIBLE_API_KEY", "chat-test-key")
+	t.Setenv("CATCLI_EMBEDDING_MODEL", "override-model")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Embedding.Model != "override-model" || cfg.Embedding.BaseURL != "http://localhost:11434/v1" || cfg.Embedding.APIKey != "ollama" {
+		t.Fatalf("embedding config = %+v", cfg.Embedding)
 	}
 }

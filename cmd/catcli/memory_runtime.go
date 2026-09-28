@@ -3,12 +3,15 @@ package main
 import (
 	"AgentCLI/internal/llm"
 	"AgentCLI/internal/memory"
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"path/filepath"
 	"strings"
 	"sync/atomic"
+	"time"
 )
 
 type conversationMemoryRuntime struct {
@@ -157,10 +160,18 @@ func (runtime *conversationMemoryRuntime) newTaskMemoryRuntime(
 }
 
 func (runtime *conversationMemoryRuntime) save() error {
-	if runtime == nil || runtime.manager == nil || runtime.conversation == nil {
+	if runtime == nil || runtime.manager == nil || runtime.conversation == nil || runtime.scheduler == nil {
 		return fmt.Errorf("conversation memory runtime is not initialized")
 	}
-	return runtime.manager.SaveConversation(runtime.conversation, runtime.conversationID)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	_, retentionErr := runtime.scheduler.EnforceStorageBudget(ctx, runtime.manager)
+	// Preserve the complete current state even if retention could not run.
+	saveErr := runtime.manager.SaveConversation(runtime.conversation, runtime.conversationID)
+	if retentionErr != nil {
+		retentionErr = fmt.Errorf("enforce Manager storage budget: %w", retentionErr)
+	}
+	return errors.Join(retentionErr, saveErr)
 }
 
 func newTaskMemoryManager(root *memory.Manager) (*memory.Manager, error) {

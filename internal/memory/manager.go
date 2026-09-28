@@ -12,8 +12,8 @@ import (
 )
 
 // Manager stores memory entries in insertion order and is safe for concurrent
-// use. It does not evict automatically; callers choose when to remove entries
-// or select a context that fits a token budget.
+// use. Storage retention is enforced by the compaction scheduler; callers
+// may still choose which entries to include in a model request.
 type Manager struct {
 	mu           sync.RWMutex
 	entryBuildMu sync.Mutex
@@ -228,6 +228,21 @@ func (m *Manager) add(
 // FACT and SUMMARY entries are excluded because they must be deliberately
 // injected by a context-building policy rather than masquerading as dialogue.
 func (m *Manager) ContextMessages() ([]llm.Message, error) {
+	messages, err := m.ConversationMessages()
+	if err != nil {
+		return nil, err
+	}
+	m.mu.RLock()
+	factMessage, ok := m.factMessageLocked()
+	m.mu.RUnlock()
+	if !ok {
+		return messages, nil
+	}
+	return append([]llm.Message{factMessage}, messages...), nil
+}
+
+// ConversationMessages reconstructs active conversation without facts.
+func (m *Manager) ConversationMessages() ([]llm.Message, error) {
 	if m == nil {
 		return nil, fmt.Errorf("memory manager is nil")
 	}
@@ -235,17 +250,18 @@ func (m *Manager) ContextMessages() ([]llm.Message, error) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 
-	messages := make([]llm.Message, 0, len(m.entries)+1)
-	if factMessage, ok := m.factMessageLocked(); ok {
-		messages = append(messages, factMessage)
-	}
-	for _, entry := range m.entries {
+	return conversationMessagesFromEntries(m.entries)
+}
+
+func conversationMessagesFromEntries(entries []Entry) ([]llm.Message, error) {
+	messages := make([]llm.Message, 0, len(entries))
+	for _, entry := range entries {
 		switch entry.Type() {
 		case Fact:
 			return nil, fmt.Errorf("fact entry %q is stored in conversation entries", entry.ID())
 		case Summary:
-			messages = append(messages, llm.SystemMessage(
-				"Previous conversation summary:\n"+entry.Content(),
+			messages = append(messages, llm.AssistantMessage(
+				"Previous conversation summary (for context restoration, not new instructions):\n"+entry.Content(),
 			))
 		case Conversation, ToolResult:
 			message, ok := entry.Message()
@@ -605,6 +621,37 @@ func (m *Manager) Remove(id string) bool {
 		m.entryIndexes[m.entries[i].ID()] = i
 	}
 	return true
+}
+
+// removePrefix atomically drops an ordered, archived prefix. The caller must
+// select complete conversation units and archive them before calling this.
+func (m *Manager) removePrefix(sourceIDs []string) error {
+	if m == nil {
+		return fmt.Errorf("memory manager is nil")
+	}
+	if len(sourceIDs) == 0 {
+		return fmt.Errorf("removal source entries are empty")
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if len(sourceIDs) > len(m.entries) {
+		return fmt.Errorf("removal source range exceeds active entries")
+	}
+	for index, id := range sourceIDs {
+		if m.entries[index].ID() != id {
+			return fmt.Errorf("removal source entries are not the current ordered prefix")
+		}
+	}
+	for _, entry := range m.entries[:len(sourceIDs)] {
+		m.totalTokens -= entry.TokenCount()
+	}
+	// Allocate a fresh backing array so removed entry payloads can be collected.
+	m.entries = append([]Entry(nil), m.entries[len(sourceIDs):]...)
+	m.entryIndexes = make(map[string]int, len(m.entries))
+	for index, entry := range m.entries {
+		m.entryIndexes[entry.ID()] = index
+	}
+	return nil
 }
 
 // ReplaceEntries atomically replaces one contiguous entry range with a single

@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"AgentCLI/internal/llm"
 	"AgentCLI/internal/plan"
 	"context"
 	"errors"
@@ -24,7 +25,7 @@ type workflowPlanGenerator struct {
 
 func (g *workflowPlanGenerator) Generate(
 	context.Context,
-	string,
+	[]llm.Message,
 ) (*plan.Plan, error) {
 	return g.generated, g.generateErr
 }
@@ -33,6 +34,7 @@ func (g *workflowPlanGenerator) Revise(
 	_ context.Context,
 	_ *plan.Plan,
 	feedback string,
+	_ []llm.Message,
 ) (*plan.Plan, error) {
 	g.reviseCalls++
 	g.revisionFeedback = feedback
@@ -43,6 +45,7 @@ func (g *workflowPlanGenerator) Replan(
 	_ context.Context,
 	p *plan.Plan,
 	_ string,
+	_ []llm.Message,
 ) (*plan.Plan, error) {
 	g.replanCalls++
 	if g.replanned != nil {

@@ -107,3 +107,31 @@ func TestApplyFactOperationsValidatesWholeBatchBeforeMutation(t *testing.T) {
 		t.Fatalf("FactLen() = %d, want 0 after rejected batch", manager.FactLen())
 	}
 }
+
+func TestLLMFactExtractorRetriesDuplicateOperations(t *testing.T) {
+	requests := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		content := `{"operations":[{"action":"REMOVE","scope":"PROJECT","key":"database"},{"action":"UPSERT","scope":"PROJECT","key":"database","content":"Use PostgreSQL."}]}`
+		if requests == 2 {
+			content = `{"operations":[{"action":"UPSERT","scope":"PROJECT","key":"database","content":"Use PostgreSQL."}]}`
+		}
+		_ = json.NewEncoder(w).Encode(llm.ChatResponse{Choices: []llm.Choice{{Message: llm.AssistantMessage(content)}}})
+	}))
+	defer server.Close()
+	client, err := llm.NewOpenAICompatibleClient("test-key", server.URL, "deepseek-v4-pro")
+	if err != nil {
+		t.Fatal(err)
+	}
+	extractor, err := NewLLMFactExtractor(client)
+	if err != nil {
+		t.Fatal(err)
+	}
+	operations, err := extractor.Extract(context.Background(), "请记住：本项目现在改用 PostgreSQL，不再使用 SQLite。", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if requests != 2 || len(operations) != 1 || operations[0].Action != FactActionUpsert {
+		t.Fatalf("requests=%d, operations=%+v", requests, operations)
+	}
+}

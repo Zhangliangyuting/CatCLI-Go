@@ -77,10 +77,31 @@ func main() {
 		return
 	}
 	requestEstimator := memory.NewCalibratedRequestTokenEstimator(nil)
+	// Hybrid retrieval uses the configured embeddings model when available.
+	var embedder memory.EmbeddingProvider
+	if model := strings.TrimSpace(cfg.Embedding.Model); model != "" {
+		apiKey := strings.TrimSpace(cfg.Embedding.APIKey)
+		if apiKey == "" {
+			apiKey = client.APIKey
+		}
+		baseURL := strings.TrimSpace(cfg.Embedding.BaseURL)
+		if baseURL == "" {
+			baseURL = client.BaseURL
+		}
+		embedder = &llm.OpenAIEmbeddingClient{
+			APIKey: apiKey, BaseURL: baseURL, Model: model, HTTPClient: client.HTTPClient,
+		}
+	}
+	retriever := memory.NewMemoryRetriever(embedder)
+	retrievedTokenBudget := cfg.OpenAICompatible.UsableInputTokens() / 5
+	rootContextBuilder := memory.NewContextBuilder(
+		memoryRuntime.manager, retriever, retrievedTokenBudget,
+	)
 	agentInstance := agent.NewReActAgent(
 		client,
 		toolRegistry,
 		agent.WithMemoryManager(memoryRuntime.manager),
+		agent.WithContextBuilder(rootContextBuilder),
 		agent.WithCompactionScheduler(memoryRuntime.scheduler),
 		agent.WithRequestTokenEstimator(requestEstimator),
 		agent.WithTranscript(memoryRuntime.transcript, memoryRuntime.conversationID),
@@ -119,6 +140,9 @@ func main() {
 				client,
 				toolRegistry,
 				agent.WithMemoryManager(taskManager),
+				agent.WithContextBuilder(memory.NewContextBuilder(
+					taskManager, retriever, retrievedTokenBudget,
+				)),
 				agent.WithCompactionScheduler(taskRuntime.scheduler),
 				agent.WithRequestTokenEstimator(requestEstimator),
 				agent.WithTranscript(memoryRuntime.transcript, taskRuntime.conversationID),
@@ -130,20 +154,19 @@ func main() {
 		cfg.Agent.TaskTimeout,
 		cfg.Agent.PlanTimeout,
 	)
-	memoryAwarePlanAgent, err := agent.NewMemoryAwarePlanAgent(
-		planAgent,
+	if err := planAgent.ConfigureMemory(
 		memoryRuntime.manager,
 		memoryRuntime.scheduler,
 		requestEstimator,
 		memoryRuntime.transcript,
 		memoryRuntime.conversationID,
-	)
-	if err != nil {
-		fmt.Println("memory-aware plan agent error:", err)
+	); err != nil {
+		fmt.Println("configure plan memory error:", err)
 		return
 	}
+	planAgent.SetContextBuilder(rootContextBuilder)
 	factAwarePlanAgent, err := agent.NewFactAwareAgent(
-		memoryAwarePlanAgent,
+		planAgent,
 		memoryRuntime.manager,
 		factExtractor,
 	)
