@@ -13,6 +13,8 @@ type ReActAgent struct {
 	llmClient           *llm.OpenAICompatibleClient
 	tools               *tool.ToolRegistry
 	memoryManager       *memory.Manager
+	contextBuilder      *memory.ContextBuilder
+	currentQuery        string
 	compactionScheduler ContextCompactionScheduler
 	requestEstimator    memory.RequestTokenEstimator
 	transcript          memory.TranscriptStore
@@ -44,6 +46,10 @@ func WithMemoryManager(manager *memory.Manager) ReActAgentOption {
 			agent.memoryManager = manager
 		}
 	}
+}
+
+func WithContextBuilder(builder *memory.ContextBuilder) ReActAgentOption {
+	return func(agent *ReActAgent) { agent.contextBuilder = builder }
 }
 
 func WithCompactionScheduler(scheduler ContextCompactionScheduler) ReActAgentOption {
@@ -104,6 +110,7 @@ func (a *ReActAgent) RunWithObserver(
 	userInput string,
 	observer Observer,
 ) (string, error) {
+	a.currentQuery = userInput
 	if _, err := a.storeMessage(llm.UserMessage(userInput), ""); err != nil {
 		return "", fmt.Errorf("store user message: %w", err)
 	}
@@ -118,7 +125,7 @@ func (a *ReActAgent) RunWithObserver(
 			return "", err
 		}
 
-		messages, err := a.contextMessages()
+		messages, err := a.contextMessagesFor(ctx)
 		if err != nil {
 			return "", err
 		}
@@ -127,7 +134,7 @@ func (a *ReActAgent) RunWithObserver(
 			return "", fmt.Errorf("estimate model request tokens: %w", err)
 		}
 
-		result, err := a.llmClient.ChatContext(
+		result, err := a.llmClient.Chat(
 			ctx,
 			messages,
 			tools,
@@ -228,7 +235,7 @@ func (a *ReActAgent) compactContextIfNeeded(
 		return nil
 	}
 	measure := func() (int, error) {
-		messages, err := a.contextMessages()
+		messages, err := a.contextMessagesFor(ctx)
 		if err != nil {
 			return 0, err
 		}
@@ -247,7 +254,17 @@ func (a *ReActAgent) ClearHistory() {
 }
 
 func (a *ReActAgent) contextMessages() ([]llm.Message, error) {
-	messages, err := a.memoryManager.ContextMessages()
+	return a.contextMessagesFor(context.Background())
+}
+
+func (a *ReActAgent) contextMessagesFor(ctx context.Context) ([]llm.Message, error) {
+	var messages []llm.Message
+	var err error
+	if a.contextBuilder != nil {
+		messages, err = a.contextBuilder.Build(ctx, a.currentQuery)
+	} else {
+		messages, err = a.memoryManager.ContextMessages()
+	}
 	if err != nil {
 		return nil, fmt.Errorf("build conversation context: %w", err)
 	}

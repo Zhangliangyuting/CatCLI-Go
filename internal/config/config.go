@@ -14,6 +14,7 @@ import (
 type Config struct {
 	ConfigFile       string                 `mapstructure:"-"`
 	OpenAICompatible OpenAICompatibleConfig `mapstructure:"openai_compatible"`
+	Embedding        EmbeddingConfig        `mapstructure:"embedding"`
 	Agent            AgentConfig            `mapstructure:"agent"`
 	Providers        ProvidersConfig        `mapstructure:"providers"`
 	Tools            ToolsConfig            `mapstructure:"tools"`
@@ -27,6 +28,12 @@ type OpenAICompatibleConfig struct {
 	MaxOutputTokens     int    `mapstructure:"max_output_tokens"`
 	OutputReserveTokens int    `mapstructure:"output_reserve_tokens"`
 	CompactionMaxTokens int    `mapstructure:"compaction_max_tokens"`
+}
+
+type EmbeddingConfig struct {
+	Model   string `mapstructure:"model"`
+	BaseURL string `mapstructure:"base_url"`
+	APIKey  string `mapstructure:"api_key"`
 }
 
 type AgentConfig struct {
@@ -85,6 +92,12 @@ func Load() (Config, error) {
 	}
 	if err := v.BindEnv("openai_compatible.compaction_max_tokens"); err != nil {
 		return Config{}, err
+	}
+
+	for _, key := range []string{"embedding.model", "embedding.base_url", "embedding.api_key"} {
+		if err := v.BindEnv(key); err != nil {
+			return Config{}, err
+		}
 	}
 
 	//查找并解析yaml文件

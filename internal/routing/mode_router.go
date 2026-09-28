@@ -65,7 +65,7 @@ func (r *HybridModeRouter) Route(
 		return Decision{}, fmt.Errorf("route mode: LLM client is nil")
 	}
 
-	result, err := r.client.ChatContext(
+	result, err := r.client.Chat(
 		ctx,
 		[]llm.Message{
 			llm.SystemMessage(modeClassifierPrompt),

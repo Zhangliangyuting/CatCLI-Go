@@ -1,0 +1,29 @@
+# Run Ollama separately from CatCLI. The model lives in a persistent volume.
+services:
+  ollama:
+    image: ollama/ollama:${OLLAMA_IMAGE_TAG:-latest}
+    restart: unless-stopped
+    ports:
+      # 11434 is already used by the native Windows Ollama installation.
+      - "127.0.0.1:11435:11434"
+    volumes:
+      - ollama-models:/root/.ollama
+    healthcheck:
+      test: ["CMD", "ollama", "list"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+
+  ollama-model-init:
+    image: ollama/ollama:${OLLAMA_IMAGE_TAG:-latest}
+    depends_on:
+      ollama:
+        condition: service_healthy
+    environment:
+      OLLAMA_HOST: http://ollama:11434
+    command: ["pull", "bge-m3"]
+    restart: "no"
+
+volumes:
+  ollama-models:

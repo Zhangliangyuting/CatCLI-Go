@@ -55,11 +55,11 @@ const PLANNING_PROMPT = `
 `
 
 type PlanGenerator interface {
-	Generate(ctx context.Context, userInput string) (*Plan, error)
+	Generate(ctx context.Context, contextMessages []llm.Message) (*Plan, error)
 	// 用户在执行前主动修改计划
-	Revise(ctx context.Context, currentPlan *Plan, feedback string) (*Plan, error)
+	Revise(ctx context.Context, currentPlan *Plan, feedback string, contextMessages []llm.Message) (*Plan, error)
 	// 执行失败后的自动重新规划
-	Replan(ctx context.Context, failedPlan *Plan, failureReason string) (*Plan, error)
+	Replan(ctx context.Context, failedPlan *Plan, failureReason string, contextMessages []llm.Message) (*Plan, error)
 }
 
 type LLMPlanGenerator struct {
@@ -76,14 +76,13 @@ func NewLLMPlanGenerator(
 
 func (g *LLMPlanGenerator) Generate(
 	ctx context.Context,
-	userInput string,
+	contextMessages []llm.Message,
 ) (*Plan, error) {
-	messages := []llm.Message{
-		llm.SystemMessage(PLANNING_PROMPT),
-		llm.UserMessage(userInput),
-	}
+	messages := make([]llm.Message, 0, len(contextMessages)+1)
+	messages = append(messages, llm.SystemMessage(PLANNING_PROMPT))
+	messages = append(messages, contextMessages...)
 
-	result, err := g.client.ChatContext(ctx, messages, nil)
+	result, err := g.client.Chat(ctx, messages, nil)
 	if err != nil {
 		return nil, fmt.Errorf("generate plan: %w", err)
 	}
@@ -201,9 +200,11 @@ func (g *LLMPlanGenerator) Replan(
 	ctx context.Context,
 	failedPlan *Plan,
 	failureReason string,
+	contextMessages []llm.Message,
 ) (*Plan, error) {
 	replanContext := buildReplanContext(failedPlan, failureReason)
-	return g.Generate(ctx, replanContext)
+	messages := append([]llm.Message(nil), contextMessages...)
+	return g.Generate(ctx, append(messages, llm.UserMessage(replanContext)))
 }
 
 func buildReplanContext(failedPlan *Plan, failureReason string) string {
@@ -280,9 +281,11 @@ func (g *LLMPlanGenerator) Revise(
 	ctx context.Context,
 	currentPlan *Plan,
 	feedback string,
+	contextMessages []llm.Message,
 ) (*Plan, error) {
 	revisionContext := buildRevisionContext(currentPlan, feedback)
-	return g.Generate(ctx, revisionContext)
+	messages := append([]llm.Message(nil), contextMessages...)
+	return g.Generate(ctx, append(messages, llm.UserMessage(revisionContext)))
 }
 
 func buildRevisionContext(

@@ -62,6 +62,18 @@ type ChatOptions struct {
 	Thinking       *ThinkingConfig
 }
 
+// DisableThinkingIfSupported adds a provider-specific request parameter only
+// for models whose non-thinking option this client knows how to express.
+func (c *OpenAICompatibleClient) DisableThinkingIfSupported(options *ChatOptions) {
+	if c == nil || options == nil {
+		return
+	}
+	switch model := strings.ToLower(strings.TrimSpace(c.Model)); {
+	case strings.HasPrefix(model, "deepseek-"):
+		options.Thinking = &ThinkingConfig{Type: "disabled"}
+	}
+}
+
 type ChatResponse struct {
 	Choices []Choice `json:"choices"`
 	Usage   Usage    `json:"usage"`
@@ -84,19 +96,15 @@ type ChatResult struct {
 	FinishReason string
 }
 
-func (c *OpenAICompatibleClient) Chat(messages []Message, toolDefinitions []tool.Definition) (ChatResult, error) {
-	return c.ChatContext(context.Background(), messages, toolDefinitions)
-}
-
-func (c *OpenAICompatibleClient) ChatContext(
+func (c *OpenAICompatibleClient) Chat(
 	ctx context.Context,
 	messages []Message,
 	toolDefinitions []tool.Definition,
 ) (ChatResult, error) {
-	return c.ChatContextWithOptions(ctx, messages, toolDefinitions, ChatOptions{})
+	return c.ChatWithOptions(ctx, messages, toolDefinitions, ChatOptions{})
 }
 
-func (c *OpenAICompatibleClient) ChatContextWithOptions(
+func (c *OpenAICompatibleClient) ChatWithOptions(
 	ctx context.Context,
 	messages []Message,
 	toolDefinitions []tool.Definition,

@@ -1,6 +1,11 @@
 package plan
 
 import (
+	"AgentCLI/internal/llm"
+	"context"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"reflect"
 	"strings"
 	"testing"
@@ -182,5 +187,55 @@ func TestBuildReplanContextIncludesSummary(t *testing.T) {
 	context := buildReplanContext(p, "测试未通过")
 	if !strings.Contains(context, "原计划摘要：\n保持接口兼容并补充测试") {
 		t.Fatalf("buildReplanContext() = %q, want plan summary", context)
+	}
+}
+
+func TestLLMPlanGeneratorPreservesDeveloperMemoryRole(t *testing.T) {
+	var requests [][]llm.Message
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		var body struct {
+			Messages []llm.Message `json:"messages"`
+		}
+		if err := json.NewDecoder(request.Body).Decode(&body); err != nil {
+			t.Errorf("decode request: %v", err)
+			writer.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		requests = append(requests, body.Messages)
+		writer.Header().Set("Content-Type", "application/json")
+		_, _ = writer.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":"{\"goal\":\"test\",\"tasks\":[{\"id\":\"one\",\"name\":\"task\",\"description\":\"do work\",\"type\":\"ANALYSIS\",\"dependencies\":[]}] }"},"finish_reason":"stop"}]}`))
+	}))
+	defer server.Close()
+
+	client, err := llm.NewOpenAICompatibleClient("test-key", server.URL, "test-model")
+	if err != nil {
+		t.Fatalf("NewOpenAICompatibleClient() error = %v", err)
+	}
+	generator := NewLLMPlanGenerator(client)
+	contextMessages := []llm.Message{
+		llm.SystemMessage("Project fact: use Go"),
+		llm.UserMessage("Build the tool"),
+	}
+	ctx := context.Background()
+	generated, err := generator.Generate(ctx, contextMessages)
+	if err != nil {
+		t.Fatalf("Generate() error = %v", err)
+	}
+	if _, err := generator.Revise(ctx, generated, "Add verification", contextMessages); err != nil {
+		t.Fatalf("Revise() error = %v", err)
+	}
+	if _, err := generator.Replan(ctx, generated, "Task failed", contextMessages); err != nil {
+		t.Fatalf("Replan() error = %v", err)
+	}
+	if len(requests) != 3 {
+		t.Fatalf("request count = %d, want 3", len(requests))
+	}
+	for index, messages := range requests {
+		if len(messages) < 3 || messages[0].Role != "system" || messages[1].Role != "system" || messages[1].Content != "Project fact: use Go" {
+			t.Fatalf("request %d message roles/content = %#v", index, messages)
+		}
+		if messages[len(messages)-1].Role != "user" {
+			t.Fatalf("request %d last message = %#v, want user", index, messages[len(messages)-1])
+		}
 	}
 }

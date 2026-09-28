@@ -190,11 +190,15 @@ func (e Entry) Message() (llm.Message, bool) {
 	metadata := e.Metadata()
 	switch e.Type() {
 	case Conversation:
-		if metadata.Role != "system" && metadata.Role != "user" && metadata.Role != "assistant" {
+		if metadata.Role != "system" && metadata.Role != "developer" && metadata.Role != "user" && metadata.Role != "assistant" {
 			return llm.Message{}, false
 		}
+		role := metadata.Role
+		if role == "developer" { // Restore older snapshots using the supported role.
+			role = "system"
+		}
 		return llm.Message{
-			Role:      metadata.Role,
+			Role:      role,
 			Content:   e.Content(),
 			ToolCalls: metadata.ToolCalls,
 		}, true

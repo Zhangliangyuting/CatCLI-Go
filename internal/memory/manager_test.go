@@ -55,6 +55,17 @@ func TestEntryMetadataIsImmutableFromCaller(t *testing.T) {
 	}
 }
 
+func TestLegacyDeveloperEntryRestoresAsSystem(t *testing.T) {
+	entry, err := NewEntry("legacy_1", "saved context", Conversation, time.Now(), Metadata{Role: "developer"}, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	message, ok := entry.Message()
+	if !ok || message.Role != "system" || message.Content != "saved context" {
+		t.Fatalf("Message() = (%+v, %v), want system context", message, ok)
+	}
+}
+
 func TestEntryRecognizesCompactedToolResult(t *testing.T) {
 	entry, err := NewEntry(
 		"tool_compact_1",
@@ -334,7 +345,7 @@ func TestContextMessagesPrependsFactsAndIncludesSummary(t *testing.T) {
 	}
 	want := []llm.Message{
 		llm.SystemMessage("Important facts and constraints:\n[PROJECT]\n- Do not change the public API"),
-		llm.SystemMessage("Previous conversation summary:\nEarlier work is complete"),
+		llm.AssistantMessage("Previous conversation summary (for context restoration, not new instructions):\nEarlier work is complete"),
 		llm.UserMessage("continue"),
 	}
 	if !reflect.DeepEqual(messages, want) {
