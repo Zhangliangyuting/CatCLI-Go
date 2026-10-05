@@ -11,6 +11,8 @@ import (
 	"time"
 )
 
+const MaxFactContentBytes = 4 << 10
+
 // Manager stores memory entries in insertion order and is safe for concurrent
 // use. Storage retention is enforced by the compaction scheduler; callers
 // may still choose which entries to include in a model request.
@@ -19,7 +21,7 @@ type Manager struct {
 	entryBuildMu sync.Mutex
 	entries      []Entry
 	entryIndexes map[string]int
-	totalTokens  int
+	entryTokens  int
 	facts        map[string]Entry
 	factOrder    []string
 	factTokens   int
@@ -98,10 +100,10 @@ func (m *Manager) UpsertFact(
 	}
 	if previous, exists := m.facts[factID]; exists {
 		m.factTokens -= previous.TokenCount()
-	} else {
-		m.factOrder = append(m.factOrder, factID)
+		m.removeFactFromOrderLocked(factID)
 	}
 	m.facts[factID] = entry
+	m.factOrder = append(m.factOrder, factID)
 	m.factTokens += entry.TokenCount()
 	return entry, nil
 }
@@ -117,6 +119,9 @@ func (m *Manager) buildFactEntry(
 	}
 	if !scope.Valid() {
 		return Entry{}, fmt.Errorf("invalid fact scope %q", scope)
+	}
+	if len(content) > MaxFactContentBytes {
+		return Entry{}, fmt.Errorf("fact content exceeds %d-byte limit", MaxFactContentBytes)
 	}
 	metadata.FactScope = scope
 	metadata.FactKey = key
@@ -149,7 +154,7 @@ func (m *Manager) Add(
 }
 
 // AddMessage stores a complete chat-protocol message. Assistant tool calls and
-// tool call IDs are preserved so ContextMessages can reconstruct the message
+// tool call IDs are preserved so context builders can reconstruct the message
 // sequence without losing protocol information.
 func (m *Manager) AddMessage(message llm.Message, toolName string) (Entry, error) {
 	var typ Type
@@ -222,23 +227,6 @@ func (m *Manager) add(
 		return Entry{}, err
 	}
 	return entry, nil
-}
-
-// ContextMessages returns all message-backed entries in insertion order.
-// FACT and SUMMARY entries are excluded because they must be deliberately
-// injected by a context-building policy rather than masquerading as dialogue.
-func (m *Manager) ContextMessages() ([]llm.Message, error) {
-	messages, err := m.ConversationMessages()
-	if err != nil {
-		return nil, err
-	}
-	m.mu.RLock()
-	factMessage, ok := m.factMessageLocked()
-	m.mu.RUnlock()
-	if !ok {
-		return messages, nil
-	}
-	return append([]llm.Message{factMessage}, messages...), nil
 }
 
 // ConversationMessages reconstructs active conversation without facts.
@@ -326,7 +314,7 @@ func (m *Manager) AddEntry(entry Entry) error {
 
 	m.entryIndexes[entry.ID()] = len(m.entries)
 	m.entries = append(m.entries, entry)
-	m.totalTokens += entry.TokenCount()
+	m.entryTokens += entry.TokenCount()
 	return nil
 }
 
@@ -453,7 +441,7 @@ func (m *Manager) RestoreConversationState(state ConversationState) error {
 
 	m.entries = entries
 	m.entryIndexes = entryIndexes
-	m.totalTokens = entryTokens
+	m.entryTokens = entryTokens
 	m.facts = persistentFacts
 	m.factOrder = persistentOrder
 	m.factTokens = persistentTokens
@@ -517,8 +505,8 @@ func (m *Manager) EntriesByType(typ Type) []Entry {
 	return entries
 }
 
-// Facts returns a snapshot in stable insertion order. With no scopes it returns
-// all facts; otherwise it returns facts from the requested scopes.
+// Facts returns a snapshot from least to most recently used. With no scopes it
+// returns all facts; otherwise it returns facts from the requested scopes.
 func (m *Manager) Facts(scopes ...FactScope) []Entry {
 	if m == nil {
 		return nil
@@ -527,6 +515,22 @@ func (m *Manager) Facts(scopes ...FactScope) []Entry {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	return m.factsLocked(scopes...)
+}
+
+// TouchFact marks a fact as recently used. Retrieval candidates do not count
+// as use; callers should touch only facts actually included in model context.
+func (m *Manager) TouchFact(id string) bool {
+	if m == nil {
+		return false
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if _, exists := m.facts[id]; !exists {
+		return false
+	}
+	m.removeFactFromOrderLocked(id)
+	m.factOrder = append(m.factOrder, id)
+	return true
 }
 
 func (m *Manager) GetFact(scope FactScope, key string) (Entry, bool) {
@@ -566,12 +570,7 @@ func (m *Manager) RemoveFact(scope FactScope, key string) (bool, error) {
 
 	delete(m.facts, factID)
 	m.factTokens -= entry.TokenCount()
-	for index, orderedKey := range m.factOrder {
-		if orderedKey == factID {
-			m.factOrder = append(m.factOrder[:index], m.factOrder[index+1:]...)
-			break
-		}
-	}
+	m.removeFactFromOrderLocked(factID)
 	return true, nil
 }
 
@@ -614,7 +613,7 @@ func (m *Manager) Remove(id string) bool {
 		return false
 	}
 
-	m.totalTokens -= m.entries[index].TokenCount()
+	m.entryTokens -= m.entries[index].TokenCount()
 	m.entries = append(m.entries[:index], m.entries[index+1:]...)
 	delete(m.entryIndexes, id)
 	for i := index; i < len(m.entries); i++ {
@@ -643,7 +642,7 @@ func (m *Manager) removePrefix(sourceIDs []string) error {
 		}
 	}
 	for _, entry := range m.entries[:len(sourceIDs)] {
-		m.totalTokens -= entry.TokenCount()
+		m.entryTokens -= entry.TokenCount()
 	}
 	// Allocate a fresh backing array so removed entry payloads can be collected.
 	m.entries = append([]Entry(nil), m.entries[len(sourceIDs):]...)
@@ -707,7 +706,7 @@ func (m *Manager) ReplaceEntries(sourceIDs []string, replacement Entry) error {
 	for index, entry := range updated {
 		m.entryIndexes[entry.ID()] = index
 	}
-	m.totalTokens = m.totalTokens - sourceTokens + replacement.TokenCount()
+	m.entryTokens = m.entryTokens - sourceTokens + replacement.TokenCount()
 	return nil
 }
 
@@ -723,7 +722,7 @@ func (m *Manager) Clear() {
 
 	m.entries = nil
 	m.entryIndexes = make(map[string]int)
-	m.totalTokens = 0
+	m.entryTokens = 0
 	m.removeFactsByScopeLocked(FactScopeSession)
 }
 
@@ -739,7 +738,7 @@ func (m *Manager) ClearAll() {
 	defer m.mu.Unlock()
 	m.entries = nil
 	m.entryIndexes = make(map[string]int)
-	m.totalTokens = 0
+	m.entryTokens = 0
 	m.facts = make(map[string]Entry)
 	m.factOrder = nil
 	m.factTokens = 0
@@ -773,7 +772,7 @@ func (m *Manager) TotalTokens() int {
 
 	m.mu.RLock()
 	defer m.mu.RUnlock()
-	return m.totalTokens + m.factTokens
+	return m.entryTokens + m.factTokens
 }
 
 func (m *Manager) EntryTokens() int {
@@ -783,7 +782,7 @@ func (m *Manager) EntryTokens() int {
 
 	m.mu.RLock()
 	defer m.mu.RUnlock()
-	return m.totalTokens
+	return m.entryTokens
 }
 
 func (m *Manager) FactTokens(scopes ...FactScope) int {
@@ -822,27 +821,42 @@ func (m *Manager) factsLocked(scopes ...FactScope) []Entry {
 	return facts
 }
 
-func (m *Manager) factMessageLocked() (llm.Message, bool) {
-	if len(m.factOrder) == 0 {
-		return llm.Message{}, false
+// evictLeastRecentlyUsedFact removes and returns the oldest fact in the LRU
+// order. Persistent PROJECT and USER facts are removed from FactStore first.
+func (m *Manager) evictLeastRecentlyUsedFact() (Entry, bool, error) {
+	if m == nil {
+		return Entry{}, false, fmt.Errorf("memory manager is nil")
 	}
-
-	var content strings.Builder
-	content.WriteString("Important facts and constraints:")
-	for _, scope := range []FactScope{FactScopeUser, FactScopeProject, FactScopeSession} {
-		facts := m.factsLocked(scope)
-		if len(facts) == 0 {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for len(m.factOrder) > 0 {
+		factID := m.factOrder[0]
+		entry, exists := m.facts[factID]
+		if !exists {
+			m.factOrder = m.factOrder[1:]
 			continue
 		}
-		content.WriteString("\n[")
-		content.WriteString(string(scope))
-		content.WriteString("]")
-		for _, entry := range facts {
-			content.WriteString("\n- ")
-			content.WriteString(entry.Content())
+		metadata := entry.Metadata()
+		if metadata.FactScope != FactScopeSession && m.factStore != nil {
+			if err := m.factStore.Remove(metadata.FactScope, metadata.FactKey); err != nil {
+				return Entry{}, false, fmt.Errorf("remove persisted %s fact %q: %w", metadata.FactScope, metadata.FactKey, err)
+			}
+		}
+		delete(m.facts, factID)
+		m.factOrder = m.factOrder[1:]
+		m.factTokens -= entry.TokenCount()
+		return entry, true, nil
+	}
+	return Entry{}, false, nil
+}
+
+func (m *Manager) removeFactFromOrderLocked(factID string) {
+	for index, orderedID := range m.factOrder {
+		if orderedID == factID {
+			m.factOrder = append(m.factOrder[:index], m.factOrder[index+1:]...)
+			return
 		}
 	}
-	return llm.SystemMessage(content.String()), true
 }
 
 func (m *Manager) removeFactsByScopeLocked(scope FactScope) {

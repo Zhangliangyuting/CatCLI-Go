@@ -47,7 +47,7 @@ func TestPlanAndExecuteAgentUsesRootContextAndWritesBackResult(t *testing.T) {
 	if _, err := manager.UpsertFact(
 		memory.FactScopeProject,
 		"language",
-		"This project uses Go.",
+		"Current plan request must use Go.",
 		memory.Metadata{},
 	); err != nil {
 		t.Fatalf("UpsertFact() error = %v", err)
@@ -65,7 +65,8 @@ func TestPlanAndExecuteAgentUsesRootContextAndWritesBackResult(t *testing.T) {
 	estimator := &recordingRequestTokenEstimator{next: 321}
 	transcript := &recordingAgentTranscript{}
 	a := NewPlanAndExecuteAgent(generator, func() Agent { return &workflowExecutor{} }, reviewer, 0, 1, 0, 0)
-	if err := a.ConfigureMemory(manager, scheduler, estimator, transcript, "conversation_1"); err != nil {
+	builder := memory.NewContextBuilder(manager, memory.NewMemoryRetriever(nil), 1000)
+	if err := a.ConfigureMemory(manager, builder, scheduler, estimator, transcript, "conversation_1"); err != nil {
 		t.Fatalf("ConfigureMemory() error = %v", err)
 	}
 
@@ -80,7 +81,7 @@ func TestPlanAndExecuteAgentUsesRootContextAndWritesBackResult(t *testing.T) {
 		t.Fatalf("planner message roles = %#v", generator.messages)
 	}
 	for _, want := range []string{
-		"This project uses Go.",
+		"Current plan request must use Go.",
 		"Earlier request",
 		"Earlier answer",
 		"Current plan request",

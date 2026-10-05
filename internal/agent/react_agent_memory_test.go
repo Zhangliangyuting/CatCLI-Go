@@ -23,7 +23,7 @@ type recordingContextCompactionScheduler struct {
 	err         error
 }
 
-func (scheduler *recordingContextCompactionScheduler) CompactToFitMeasured(
+func (scheduler *recordingContextCompactionScheduler) CompactToFit(
 	_ context.Context,
 	manager *memory.Manager,
 	measure memory.ContextTokenMeasurer,

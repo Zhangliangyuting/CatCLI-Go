@@ -12,13 +12,24 @@ func TestConversationMemoryRuntimeCreatesSavesAndResumes(t *testing.T) {
 		t.Fatalf("NewOpenAICompatibleClient() error = %v", err)
 	}
 	root := t.TempDir()
+	retriever := memory.NewMemoryRetriever(nil)
 
-	created, err := newConversationMemoryRuntime(client, root, "", 100_000, 4096)
+	created, err := newConversationMemoryRuntime(client, retriever, root, "", 100_000, 4096)
 	if err != nil {
 		t.Fatalf("newConversationMemoryRuntime() error = %v", err)
 	}
-	if created.conversationID == "" || created.resumed || created.scheduler == nil {
+	if created.conversationID == "" || created.resumed || created.scheduler == nil || created.contextBuilder == nil {
 		t.Fatalf("created runtime = %+v", created)
+	}
+	if created.contextBuilder.Manager != created.manager || created.contextBuilder.Retriever != retriever || created.contextBuilder.MaxRetrievedTokens != 20_000 {
+		t.Fatalf("root context builder is not bound to the runtime: %+v", created.contextBuilder)
+	}
+	taskRuntime, err := created.newTaskMemoryRuntime("task-with-context")
+	if err != nil {
+		t.Fatalf("newTaskMemoryRuntime() error = %v", err)
+	}
+	if taskRuntime.manager == nil || taskRuntime.contextBuilder == nil || taskRuntime.contextBuilder.Manager != taskRuntime.manager || taskRuntime.contextBuilder.Retriever != retriever {
+		t.Fatalf("task memory runtime is incomplete: %+v", taskRuntime)
 	}
 	firstTaskScheduler, err := created.newTaskScheduler("task/with unsafe characters")
 	if err != nil {
@@ -48,6 +59,7 @@ func TestConversationMemoryRuntimeCreatesSavesAndResumes(t *testing.T) {
 
 	resumed, err := newConversationMemoryRuntime(
 		client,
+		retriever,
 		root,
 		created.conversationID,
 		100_000,
@@ -80,8 +92,18 @@ func TestConversationMemoryRuntimeRejectsInvalidConversationID(t *testing.T) {
 		t.Fatalf("NewOpenAICompatibleClient() error = %v", err)
 	}
 
-	if _, err := newConversationMemoryRuntime(client, t.TempDir(), "../escape", 100_000, 4096); err == nil {
+	if _, err := newConversationMemoryRuntime(client, memory.NewMemoryRetriever(nil), t.TempDir(), "../escape", 100_000, 4096); err == nil {
 		t.Fatal("newConversationMemoryRuntime() error = nil, want invalid ID error")
+	}
+}
+
+func TestConversationMemoryRuntimeRequiresSharedRetriever(t *testing.T) {
+	client, err := llm.NewOpenAICompatibleClient("test-key", "http://example.test", "test-model")
+	if err != nil {
+		t.Fatalf("NewOpenAICompatibleClient() error = %v", err)
+	}
+	if _, err := newConversationMemoryRuntime(client, nil, t.TempDir(), "", 100_000, 4096); err == nil {
+		t.Fatal("newConversationMemoryRuntime() error = nil, want missing retriever error")
 	}
 }
 

@@ -13,6 +13,7 @@ import (
 // receives its own memory manager through the task factory.
 func (a *PlanAndExecuteAgent) ConfigureMemory(
 	manager *memory.Manager,
+	builder *memory.ContextBuilder,
 	scheduler ContextCompactionScheduler,
 	estimator memory.RequestTokenEstimator,
 	transcript memory.TranscriptStore,
@@ -23,6 +24,9 @@ func (a *PlanAndExecuteAgent) ConfigureMemory(
 	}
 	if manager == nil {
 		return fmt.Errorf("memory manager is nil")
+	}
+	if builder == nil {
+		return fmt.Errorf("context builder is nil")
 	}
 	if scheduler == nil {
 		return fmt.Errorf("compaction scheduler is nil")
@@ -37,15 +41,12 @@ func (a *PlanAndExecuteAgent) ConfigureMemory(
 		return fmt.Errorf("conversation ID is empty")
 	}
 	a.memoryManager = manager
+	a.contextBuilder = builder
 	a.compactionScheduler = scheduler
 	a.requestEstimator = estimator
 	a.transcript = transcript
 	a.conversationID = conversationID
 	return nil
-}
-
-func (a *PlanAndExecuteAgent) SetContextBuilder(builder *memory.ContextBuilder) {
-	a.contextBuilder = builder
 }
 
 func (a *PlanAndExecuteAgent) compactPlanContext(ctx context.Context, observer Observer) error {
@@ -62,7 +63,7 @@ func (a *PlanAndExecuteAgent) compactPlanContext(ctx context.Context, observer O
 		messages = append(messages, contextMessages...)
 		return a.requestEstimator.Estimate(messages, nil)
 	}
-	decisions, err := a.compactionScheduler.CompactToFitMeasured(ctx, a.memoryManager, measure)
+	decisions, err := a.compactionScheduler.CompactToFit(ctx, a.memoryManager, measure)
 	emitCompactionDecisions(observer, decisions)
 	if err != nil {
 		return fmt.Errorf("compact plan context: %w", err)
@@ -75,13 +76,16 @@ func (a *PlanAndExecuteAgent) planningMessages() ([]llm.Message, error) {
 }
 
 func (a *PlanAndExecuteAgent) planningMessagesFor(ctx context.Context) ([]llm.Message, error) {
-	var messages []llm.Message
-	var err error
-	if a.contextBuilder != nil {
-		messages, err = a.contextBuilder.Build(ctx, a.currentQuery)
-	} else {
-		messages, err = a.memoryManager.ContextMessages()
+	return a.planningMessagesForObserved(ctx, nil)
+}
+
+func (a *PlanAndExecuteAgent) planningMessagesForObserved(ctx context.Context, observer Observer) ([]llm.Message, error) {
+	if a.contextBuilder == nil {
+		return nil, fmt.Errorf("context builder is nil")
 	}
+	messages, err := a.contextBuilder.BuildWithReport(ctx, a.currentQuery, func(report memory.RetrievalReport) {
+		emit(observer, Event{Type: EventMemoryRetrieval, Retrieval: &report})
+	})
 	if err != nil {
 		return nil, fmt.Errorf("build plan conversation context: %w", err)
 	}

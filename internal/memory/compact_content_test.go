@@ -11,9 +11,9 @@ func TestToolResultCompactContentValidatesAndRenders(t *testing.T) {
 		Overview: "Read internal/memory/manager.go.",
 		KeyFindings: []string{
 			"Manager stores entries separately from facts.",
-			"ContextMessages preserves tool protocol fields.",
+			"ConversationMessages preserves tool protocol fields.",
 		},
-		References:    []string{"internal/memory/manager.go", "Manager.ContextMessages"},
+		References:    []string{"internal/memory/manager.go", "Manager.ConversationMessages"},
 		OmittedReason: "Unrelated helpers and repetitive fixtures were omitted.",
 	}
 	markdown, err := content.RenderMarkdown()

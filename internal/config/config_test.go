@@ -121,7 +121,7 @@ func TestLoadEmbeddingFromYAMLWithEnvironmentOverride(t *testing.T) {
 	if err := os.Mkdir(filepath.Join(root, "config"), 0700); err != nil {
 		t.Fatal(err)
 	}
-	yaml := "embedding:\n  model: bge-m3\n  base_url: http://localhost:11434/v1\n  api_key: ollama\n"
+	yaml := "debug: false\nembedding:\n  model: bge-m3\n  base_url: http://localhost:11434/v1\n  api_key: ollama\n"
 	if err := os.WriteFile(filepath.Join(root, "config", "config.yaml"), []byte(yaml), 0600); err != nil {
 		t.Fatal(err)
 	}
@@ -131,6 +131,7 @@ func TestLoadEmbeddingFromYAMLWithEnvironmentOverride(t *testing.T) {
 	t.Cleanup(func() { _ = os.Chdir(original) })
 	t.Setenv("CATCLI_OPENAI_COMPATIBLE_API_KEY", "chat-test-key")
 	t.Setenv("CATCLI_EMBEDDING_MODEL", "override-model")
+	t.Setenv("CATCLI_DEBUG", "true")
 
 	cfg, err := Load()
 	if err != nil {
@@ -138,5 +139,8 @@ func TestLoadEmbeddingFromYAMLWithEnvironmentOverride(t *testing.T) {
 	}
 	if cfg.Embedding.Model != "override-model" || cfg.Embedding.BaseURL != "http://localhost:11434/v1" || cfg.Embedding.APIKey != "ollama" {
 		t.Fatalf("embedding config = %+v", cfg.Embedding)
+	}
+	if !cfg.Debug {
+		t.Fatal("CATCLI_DEBUG did not override YAML debug setting")
 	}
 }

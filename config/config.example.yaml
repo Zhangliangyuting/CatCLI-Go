@@ -1,3 +1,5 @@
+debug: false
+
 openai_compatible:
   api_key: your-api-key
   base_url: https://api.deepseek.com

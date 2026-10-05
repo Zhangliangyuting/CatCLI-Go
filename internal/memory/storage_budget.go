@@ -6,26 +6,29 @@ import (
 	"fmt"
 )
 
-// StorageBudget bounds approximate Manager-retained data, independently of
-// the tokens selected for any particular model request. Facts and the newest
-// conversation unit are protected from eviction.
+// StorageBudget bounds conversation data independently of the tokens selected
+// for a model request. Facts have a separate count limit and do not consume the
+// conversation entry or byte budgets.
 type StorageBudget struct {
 	MaxEntries    int
 	TargetEntries int
 	MaxBytes      int
 	TargetBytes   int
+	MaxFacts      int
 }
 
 func DefaultStorageBudget() StorageBudget {
 	return StorageBudget{
 		MaxEntries: 2048, TargetEntries: 1536,
 		MaxBytes: 16 << 20, TargetBytes: 12 << 20,
+		MaxFacts: 512,
 	}
 }
 
 func (budget StorageBudget) Validate() error {
 	if budget.MaxEntries <= 0 || budget.TargetEntries <= 0 || budget.TargetEntries >= budget.MaxEntries ||
-		budget.MaxBytes <= 0 || budget.TargetBytes <= 0 || budget.TargetBytes >= budget.MaxBytes {
+		budget.MaxBytes <= 0 || budget.TargetBytes <= 0 || budget.TargetBytes >= budget.MaxBytes ||
+		budget.MaxFacts <= 0 {
 		return fmt.Errorf("invalid Manager storage budget")
 	}
 	return nil
@@ -44,31 +47,28 @@ func (usage StorageUsage) aboveTarget(budget StorageBudget) bool {
 	return usage.Entries > budget.TargetEntries || usage.Bytes > budget.TargetBytes
 }
 
-// StorageBudgetExceededError means only protected facts/current conversation
-// remain and the configured bound cannot be met without losing them.
+// StorageBudgetExceededError means the newest conversation unit alone exceeds
+// the configured conversation bound after compressible history is exhausted.
 type StorageBudgetExceededError struct {
 	Usage  StorageUsage
 	Budget StorageBudget
 }
 
 func (err *StorageBudgetExceededError) Error() string {
-	return fmt.Sprintf("Manager storage remains over budget: entries=%d/%d bytes=%d/%d; only protected memory remains",
+	return fmt.Sprintf("conversation storage remains over budget: entries=%d/%d bytes=%d/%d; only the newest conversation unit remains",
 		err.Usage.Entries, err.Budget.MaxEntries, err.Usage.Bytes, err.Budget.MaxBytes)
 }
 
-// StorageUsage counts retained entries and estimates their heap footprint.
-// This is an accounting bound, not an exact Go heap measurement.
+// StorageUsage counts conversation entries and estimates only their heap
+// footprint. Facts are governed separately by StorageBudget.MaxFacts.
 func (m *Manager) StorageUsage() StorageUsage {
 	if m == nil {
 		return StorageUsage{}
 	}
 	m.mu.RLock()
 	defer m.mu.RUnlock()
-	usage := StorageUsage{Entries: len(m.entries) + len(m.facts)}
+	usage := StorageUsage{Entries: len(m.entries)}
 	for _, entry := range m.entries {
-		usage.Bytes += approximateEntryBytes(entry)
-	}
-	for _, entry := range m.facts {
 		usage.Bytes += approximateEntryBytes(entry)
 	}
 	return usage
@@ -90,9 +90,11 @@ func approximateEntryBytes(entry Entry) int {
 	return bytes
 }
 
-// EnforceStorageBudget compresses old conversation units first. If no useful
-// compaction remains, it archives and removes the oldest complete unit. It
-// never evicts facts or the newest unit and never evicts after an LLM error.
+// EnforceStorageBudget first evicts facts above their independent count limit
+// in least-recently-used order. Conversation limits are then enforced by
+// compacting old units and, when no useful compaction remains, archiving and
+// removing the oldest complete unit. Facts are never evicted to satisfy the
+// conversation byte or entry limits, and the newest conversation unit remains.
 func (scheduler *CompactionScheduler) EnforceStorageBudget(ctx context.Context, manager *Manager) ([]CompactionDecision, error) {
 	if scheduler == nil || scheduler.compactor == nil || manager == nil {
 		return nil, fmt.Errorf("storage budget requires a scheduler and Manager")
@@ -101,11 +103,30 @@ func (scheduler *CompactionScheduler) EnforceStorageBudget(ctx context.Context, 
 	if err := budget.Validate(); err != nil {
 		return nil, err
 	}
+	decisions := make([]CompactionDecision, 0)
+	for manager.FactLen() > budget.MaxFacts {
+		if err := ctx.Err(); err != nil {
+			return decisions, err
+		}
+		fact, evicted, err := manager.evictLeastRecentlyUsedFact()
+		if err != nil {
+			return decisions, fmt.Errorf("evict least recently used fact: %w", err)
+		}
+		if !evicted {
+			break
+		}
+		decisions = append(decisions, CompactionDecision{
+			Action: CompactionActionEvict, Reason: "Fact count limit: removed least recently used fact",
+			BeforeTokens: fact.TokenCount(), Result: CompactionResult{
+				Kind: CompactionNone, SourceEntryIDs: []string{fact.ID()}, OriginalTokens: fact.TokenCount(),
+			},
+		})
+	}
+
 	usage := manager.StorageUsage()
 	if !usage.exceeds(budget) {
-		return nil, nil
+		return decisions, nil
 	}
-	decisions := make([]CompactionDecision, 0)
 	// Each successful operation removes an entry or changes the oldest unit.
 	// The extra attempts allow for one nonreducing summary and byte growth.
 	attemptLimit := usage.Entries*2 + 4

@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"AgentCLI/internal/memory"
 	"context"
 	"sync"
 )
@@ -11,6 +12,7 @@ const (
 	EventTokenUsage       EventType = "token_usage"
 	EventMemoryCompaction EventType = "memory_compaction"
 	EventMemoryFact       EventType = "memory_fact"
+	EventMemoryRetrieval  EventType = "memory_retrieval"
 	EventToolCall         EventType = "tool_call"
 	EventToolResult       EventType = "tool_result"
 	EventTaskStarted      EventType = "task_started"
@@ -28,10 +30,11 @@ const (
 )
 
 type Event struct {
-	Type    EventType
-	TaskID  string
-	Title   string
-	Content string
+	Type      EventType
+	TaskID    string
+	Title     string
+	Content   string
+	Retrieval *memory.RetrievalReport
 }
 
 type Observer func(Event)

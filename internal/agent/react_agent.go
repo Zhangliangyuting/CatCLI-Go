@@ -28,7 +28,7 @@ var _ ObservableAgent = (*ReActAgent)(nil)
 // ReActAgent. Keeping the dependency as an interface makes scheduling behavior
 // deterministic in agent tests.
 type ContextCompactionScheduler interface {
-	CompactToFitMeasured(
+	CompactToFit(
 		ctx context.Context,
 		manager *memory.Manager,
 		measure memory.ContextTokenMeasurer,
@@ -49,7 +49,11 @@ func WithMemoryManager(manager *memory.Manager) ReActAgentOption {
 }
 
 func WithContextBuilder(builder *memory.ContextBuilder) ReActAgentOption {
-	return func(agent *ReActAgent) { agent.contextBuilder = builder }
+	return func(agent *ReActAgent) {
+		if builder != nil {
+			agent.contextBuilder = builder
+		}
+	}
 }
 
 func WithCompactionScheduler(scheduler ContextCompactionScheduler) ReActAgentOption {
@@ -95,6 +99,9 @@ func NewReActAgent(
 			option(agent)
 		}
 	}
+	if agent.contextBuilder == nil {
+		agent.contextBuilder = memory.NewContextBuilder(agent.memoryManager, nil, 0)
+	}
 	return agent
 }
 
@@ -125,7 +132,7 @@ func (a *ReActAgent) RunWithObserver(
 			return "", err
 		}
 
-		messages, err := a.contextMessagesFor(ctx)
+		messages, err := a.contextMessagesForObserved(ctx, observer)
 		if err != nil {
 			return "", err
 		}
@@ -241,7 +248,7 @@ func (a *ReActAgent) compactContextIfNeeded(
 		}
 		return a.requestEstimator.Estimate(messages, tools)
 	}
-	decisions, err := a.compactionScheduler.CompactToFitMeasured(ctx, a.memoryManager, measure)
+	decisions, err := a.compactionScheduler.CompactToFit(ctx, a.memoryManager, measure)
 	emitCompactionDecisions(observer, decisions)
 	if err != nil {
 		return fmt.Errorf("compact conversation context: %w", err)
@@ -258,13 +265,16 @@ func (a *ReActAgent) contextMessages() ([]llm.Message, error) {
 }
 
 func (a *ReActAgent) contextMessagesFor(ctx context.Context) ([]llm.Message, error) {
-	var messages []llm.Message
-	var err error
-	if a.contextBuilder != nil {
-		messages, err = a.contextBuilder.Build(ctx, a.currentQuery)
-	} else {
-		messages, err = a.memoryManager.ContextMessages()
+	return a.contextMessagesForObserved(ctx, nil)
+}
+
+func (a *ReActAgent) contextMessagesForObserved(ctx context.Context, observer Observer) ([]llm.Message, error) {
+	if a.contextBuilder == nil {
+		return nil, fmt.Errorf("context builder is nil")
 	}
+	messages, err := a.contextBuilder.BuildWithReport(ctx, a.currentQuery, func(report memory.RetrievalReport) {
+		emit(observer, Event{Type: EventMemoryRetrieval, Retrieval: &report})
+	})
 	if err != nil {
 		return nil, fmt.Errorf("build conversation context: %w", err)
 	}

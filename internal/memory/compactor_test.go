@@ -111,9 +111,9 @@ func TestMicroCompactPreservesToolProtocolAndArchivesOriginal(t *testing.T) {
 	if got := entryIDs(manager.Entries()); !reflect.DeepEqual(got, []string{"user-1", "assistant-call", "compact-1"}) {
 		t.Fatalf("manager entries = %v", got)
 	}
-	messages, err := manager.ContextMessages()
+	messages, err := manager.ConversationMessages()
 	if err != nil {
-		t.Fatalf("ContextMessages() error = %v", err)
+		t.Fatalf("ConversationMessages() error = %v", err)
 	}
 	if messages[2].Role != "tool" || messages[2].ToolCallID != "call-1" {
 		t.Fatalf("compacted protocol message = %+v", messages[2])
@@ -197,7 +197,7 @@ func TestSessionCompactDoesNotSplitIncompleteToolTurn(t *testing.T) {
 	}
 }
 
-func TestFullCompactMergesSummariesAndHistoryButKeepsRecentTurn(t *testing.T) {
+func TestFullCompactPromotesSessionSummaryAndKeepsRecentTurn(t *testing.T) {
 	manager := compactTestManager()
 	priorSummary := mustStoredEntry(t, "session-summary", "old summary", Summary, compactTestTime(), Metadata{
 		Compaction: CompactionMetadata{
@@ -217,7 +217,8 @@ func TestFullCompactMergesSummariesAndHistoryButKeepsRecentTurn(t *testing.T) {
 			}
 		}
 	}
-	wantSources := append([]string{priorSummary.ID()}, entryIDsOf(turns[0])...)
+	wantSources := []string{priorSummary.ID()}
+	wantSources = append(wantSources, entryIDsOf(turns[0])...)
 	wantSources = append(wantSources, entryIDsOf(turns[1])...)
 
 	generator := &fakeCompactionGenerator{summaryContent: validSummaryContent()}
@@ -230,12 +231,96 @@ func TestFullCompactMergesSummariesAndHistoryButKeepsRecentTurn(t *testing.T) {
 	if !compacted || result.Kind != CompactionFull || !reflect.DeepEqual(result.SourceEntryIDs, wantSources) {
 		t.Fatalf("FullCompact() = (%+v, %v), want sources %v", result, compacted, wantSources)
 	}
+	if !reflect.DeepEqual(generator.summarySources, wantSources) {
+		t.Fatalf("generator sources = %v, want SESSION summary and raw turns %v", generator.summarySources, wantSources)
+	}
 	remaining := manager.Entries()
 	if len(remaining) != 3 || remaining[0].Metadata().Compaction.Kind != CompactionFull {
 		t.Fatalf("remaining entries = %#v", remaining)
 	}
 	if !reflect.DeepEqual(entryIDs(remaining[1:]), entryIDsOf(turns[2])) {
 		t.Fatal("most recent turn was not retained verbatim")
+	}
+}
+
+func TestFullCompactDoesNotRecompactFullSummary(t *testing.T) {
+	manager := compactTestManager()
+	priorFull := mustStoredEntry(t, "full-summary", "stable full summary", Summary, compactTestTime(), Metadata{
+		Compaction: CompactionMetadata{
+			Kind: CompactionFull, SourceEntryIDs: []string{"old-1", "old-2"}, OriginalTokens: 500,
+		},
+	}, 100)
+	if err := manager.AddEntry(priorFull); err != nil {
+		t.Fatalf("AddEntry(FULL summary) error = %v", err)
+	}
+	priorSession := mustStoredEntry(t, "session-summary", "newer session summary", Summary, compactTestTime(), Metadata{
+		Compaction: CompactionMetadata{
+			Kind: CompactionSession, SourceEntryIDs: []string{"session-1"}, OriginalTokens: 300,
+		},
+	}, 80)
+	if err := manager.AddEntry(priorSession); err != nil {
+		t.Fatalf("AddEntry(SESSION summary) error = %v", err)
+	}
+	turns := make([][]Entry, 0, 2)
+	for turn := 1; turn <= 2; turn++ {
+		entries := compactTestTurn(t, turn, false)
+		turns = append(turns, entries)
+		for _, entry := range entries {
+			if err := manager.AddEntry(entry); err != nil {
+				t.Fatalf("AddEntry(turn) error = %v", err)
+			}
+		}
+	}
+
+	wantSources := []string{priorSession.ID()}
+	wantSources = append(wantSources, entryIDsOf(turns[0])...)
+	compactor := mustCompactor(t, &fakeCompactionGenerator{summaryContent: validSummaryContent()}, &recordingTranscriptStore{})
+	result, compacted, err := compactor.FullCompact(context.Background(), manager)
+	if err != nil {
+		t.Fatalf("FullCompact() error = %v", err)
+	}
+	if !compacted || !reflect.DeepEqual(result.SourceEntryIDs, wantSources) {
+		t.Fatalf("FullCompact() = (%+v, %v), want sources %v", result, compacted, wantSources)
+	}
+	remaining := manager.Entries()
+	if remaining[0].ID() != priorFull.ID() || remaining[1].Metadata().Compaction.Kind != CompactionFull {
+		t.Fatalf("remaining entries = %#v", remaining)
+	}
+}
+
+func TestFullCompactLimitsEachSummaryToEightRawTurns(t *testing.T) {
+	manager := compactTestManager()
+	turns := make([][]Entry, 0, 11)
+	for turn := 1; turn <= 11; turn++ {
+		entries := compactTestTurn(t, turn, false)
+		turns = append(turns, entries)
+		for _, entry := range entries {
+			if err := manager.AddEntry(entry); err != nil {
+				t.Fatalf("AddEntry(turn) error = %v", err)
+			}
+		}
+	}
+	wantSources := make([]string, 0, fullCompactMaxUnits*2)
+	for _, turn := range turns[:fullCompactMaxUnits] {
+		wantSources = append(wantSources, entryIDsOf(turn)...)
+	}
+
+	generator := &fakeCompactionGenerator{summaryContent: validSummaryContent()}
+	compactor := mustCompactor(t, generator, &recordingTranscriptStore{})
+	result, compacted, err := compactor.FullCompact(context.Background(), manager)
+	if err != nil {
+		t.Fatalf("FullCompact() error = %v", err)
+	}
+	if !compacted || !reflect.DeepEqual(result.SourceEntryIDs, wantSources) {
+		t.Fatalf("FullCompact() = (%+v, %v), want at most %d units", result, compacted, fullCompactMaxUnits)
+	}
+	wantRemaining := make([]string, 0, 1+len(turns[fullCompactMaxUnits:])*2)
+	wantRemaining = append(wantRemaining, result.Entry.ID())
+	for _, turn := range turns[fullCompactMaxUnits:] {
+		wantRemaining = append(wantRemaining, entryIDsOf(turn)...)
+	}
+	if got := entryIDs(manager.Entries()); !reflect.DeepEqual(got, wantRemaining) {
+		t.Fatalf("remaining entries = %v, want %v", got, wantRemaining)
 	}
 }
 

@@ -63,7 +63,9 @@ func TestCompactToFitRepeatsUntilLowWaterMark(t *testing.T) {
 	}
 	scheduler := mustScheduler(t, 2000, &recordingTranscriptStore{})
 
-	decisions, err := scheduler.CompactToFit(context.Background(), manager)
+	decisions, err := scheduler.CompactToFit(context.Background(), manager, func() (int, error) {
+		return manager.TotalTokens(), nil
+	})
 	if err != nil {
 		t.Fatalf("CompactToFit() error = %v", err)
 	}
@@ -119,7 +121,9 @@ func TestCompactToFitStopsAfterBoundAndRejectsOversizedContext(t *testing.T) {
 	}
 	scheduler := mustScheduler(t, 1000, &recordingTranscriptStore{})
 
-	decisions, err := scheduler.CompactToFit(context.Background(), manager)
+	decisions, err := scheduler.CompactToFit(context.Background(), manager, func() (int, error) {
+		return manager.TotalTokens(), nil
+	})
 	var budgetErr *ContextBudgetExceededError
 	if !errors.As(err, &budgetErr) {
 		t.Fatalf("CompactToFit() error = %v, want ContextBudgetExceededError", err)
@@ -132,7 +136,7 @@ func TestCompactToFitStopsAfterBoundAndRejectsOversizedContext(t *testing.T) {
 	}
 }
 
-func TestCompactToFitMeasuredUsesCompleteRequestTokens(t *testing.T) {
+func TestCompactToFitUsesCompleteRequestTokens(t *testing.T) {
 	manager := compactTestManager()
 	if err := manager.AddEntry(mustEntry(t, "summary", "small", Summary, 100)); err != nil {
 		t.Fatalf("AddEntry() error = %v", err)
@@ -144,10 +148,10 @@ func TestCompactToFitMeasuredUsesCompleteRequestTokens(t *testing.T) {
 		measurements++
 		return 1100, nil
 	}
-	decisions, err := scheduler.CompactToFitMeasured(context.Background(), manager, measure)
+	decisions, err := scheduler.CompactToFit(context.Background(), manager, measure)
 	var budgetErr *ContextBudgetExceededError
 	if !errors.As(err, &budgetErr) {
-		t.Fatalf("CompactToFitMeasured() error = %v, want ContextBudgetExceededError", err)
+		t.Fatalf("CompactToFit() error = %v, want ContextBudgetExceededError", err)
 	}
 	if len(decisions) != 0 || budgetErr.CurrentTokens != 1100 {
 		t.Fatalf("decisions=%v budget error=%+v", decisions, budgetErr)
@@ -157,7 +161,7 @@ func TestCompactToFitMeasuredUsesCompleteRequestTokens(t *testing.T) {
 	}
 }
 
-func TestCompactToFitMeasuredTriggersFromRequestOverhead(t *testing.T) {
+func TestCompactToFitTriggersFromRequestOverhead(t *testing.T) {
 	manager := compactTestManager()
 	toolResult := mustStoredEntry(
 		t,
@@ -178,9 +182,9 @@ func TestCompactToFitMeasuredTriggersFromRequestOverhead(t *testing.T) {
 		return manager.TotalTokens() + 450, nil
 	}
 
-	decisions, err := scheduler.CompactToFitMeasured(context.Background(), manager, measure)
+	decisions, err := scheduler.CompactToFit(context.Background(), manager, measure)
 	if err != nil {
-		t.Fatalf("CompactToFitMeasured() error = %v", err)
+		t.Fatalf("CompactToFit() error = %v", err)
 	}
 	if len(decisions) != 1 || decisions[0].Action != CompactionActionMicro {
 		t.Fatalf("decisions = %+v, want one MicroCompact", decisions)
@@ -218,11 +222,11 @@ func TestCompactToFitSkipsNonReducingMicroAndTriesNextCandidate(t *testing.T) {
 		summaryContent: validSummaryContent(),
 	}
 	scheduler := schedulerWithGenerator(t, 1600, generator, &recordingTranscriptStore{})
-	decisions, err := scheduler.CompactToFitMeasured(context.Background(), manager, func() (int, error) {
+	decisions, err := scheduler.CompactToFit(context.Background(), manager, func() (int, error) {
 		return manager.TotalTokens() + 100, nil
 	})
 	if err != nil {
-		t.Fatalf("CompactToFitMeasured() error = %v", err)
+		t.Fatalf("CompactToFit() error = %v", err)
 	}
 	if got := []CompactionAction{decisions[0].Action, decisions[1].Action}; !reflect.DeepEqual(got, []CompactionAction{CompactionActionSkip, CompactionActionMicro}) {
 		t.Fatalf("decision actions = %v, want [SKIP MICRO]", got)
@@ -234,10 +238,10 @@ func TestCompactToFitSkipsNonReducingMicroAndTriesNextCandidate(t *testing.T) {
 		t.Fatal("non-reducing source was modified")
 	}
 	toolCallsBefore := len(generator.toolCalls)
-	if _, err := scheduler.CompactToFitMeasured(context.Background(), manager, func() (int, error) {
+	if _, err := scheduler.CompactToFit(context.Background(), manager, func() (int, error) {
 		return manager.TotalTokens() + 500, nil
 	}); err != nil {
-		t.Fatalf("second CompactToFitMeasured() error = %v", err)
+		t.Fatalf("second CompactToFit() error = %v", err)
 	}
 	if len(generator.toolCalls) != toolCallsBefore {
 		t.Fatalf("previously skipped candidate was retried: calls=%v", generator.toolCalls)
@@ -255,11 +259,11 @@ func TestCompactToFitFallsBackToFullAfterMicroCandidatesDoNotReduce(t *testing.T
 	}
 	transcript := &recordingTranscriptStore{}
 	scheduler := schedulerWithGenerator(t, 1600, generator, transcript)
-	decisions, err := scheduler.CompactToFitMeasured(context.Background(), manager, func() (int, error) {
+	decisions, err := scheduler.CompactToFit(context.Background(), manager, func() (int, error) {
 		return manager.TotalTokens() + 100, nil
 	})
 	if err != nil {
-		t.Fatalf("CompactToFitMeasured() error = %v", err)
+		t.Fatalf("CompactToFit() error = %v", err)
 	}
 	actions := make([]CompactionAction, 0, len(decisions))
 	for _, decision := range decisions {
@@ -283,12 +287,12 @@ func TestCompactToFitReturnsBudgetErrorOnlyAfterIneffectiveStrategies(t *testing
 		summaryContent: validSummaryContent(),
 	}
 	scheduler := schedulerWithGenerator(t, 1600, generator, &recordingTranscriptStore{})
-	decisions, err := scheduler.CompactToFitMeasured(context.Background(), manager, func() (int, error) {
+	decisions, err := scheduler.CompactToFit(context.Background(), manager, func() (int, error) {
 		return manager.TotalTokens() + 800, nil
 	})
 	var budgetErr *ContextBudgetExceededError
 	if !errors.As(err, &budgetErr) {
-		t.Fatalf("CompactToFitMeasured() error = %v, want ContextBudgetExceededError", err)
+		t.Fatalf("CompactToFit() error = %v, want ContextBudgetExceededError", err)
 	}
 	if len(decisions) != 2 || decisions[0].Action != CompactionActionSkip || decisions[1].Action != CompactionActionSkip {
 		t.Fatalf("decisions = %+v, want two skipped Micro candidates", decisions)
@@ -308,11 +312,11 @@ func TestCompactToFitAllowsOriginalContextWhenIneffectiveButUnderHardBudget(t *t
 		summaryContent: validSummaryContent(),
 	}
 	scheduler := schedulerWithGenerator(t, 1600, generator, &recordingTranscriptStore{})
-	decisions, err := scheduler.CompactToFitMeasured(context.Background(), manager, func() (int, error) {
+	decisions, err := scheduler.CompactToFit(context.Background(), manager, func() (int, error) {
 		return manager.TotalTokens() + 100, nil
 	})
 	if err != nil {
-		t.Fatalf("CompactToFitMeasured() error = %v, want original context to proceed", err)
+		t.Fatalf("CompactToFit() error = %v, want original context to proceed", err)
 	}
 	if len(decisions) != 2 || decisions[0].Action != CompactionActionSkip || decisions[1].Action != CompactionActionSkip {
 		t.Fatalf("decisions = %+v, want two skipped candidates", decisions)
@@ -325,9 +329,9 @@ func TestCompactionSchedulerDoesNothingBelowSixtyPercent(t *testing.T) {
 		t.Fatalf("AddEntry() error = %v", err)
 	}
 	scheduler := mustScheduler(t, 1000, &recordingTranscriptStore{})
-	decision, err := scheduler.CompactIfNeeded(context.Background(), manager)
+	decision, err := scheduler.compactIfNeeded(context.Background(), manager, manager.TotalTokens())
 	if err != nil {
-		t.Fatalf("CompactIfNeeded() error = %v", err)
+		t.Fatalf("compactIfNeeded() error = %v", err)
 	}
 	if decision.Action != CompactionActionNone || decision.BeforeTokens != 599 || decision.AfterTokens != 599 {
 		t.Fatalf("decision = %+v, want no-op at 59.9%%", decision)
@@ -350,9 +354,9 @@ func TestCompactionSchedulerSelectsLargestToolResultAtSixtyPercent(t *testing.T)
 	}
 	transcript := &recordingTranscriptStore{}
 	scheduler := mustScheduler(t, 1000, transcript)
-	decision, err := scheduler.CompactIfNeeded(context.Background(), manager)
+	decision, err := scheduler.compactIfNeeded(context.Background(), manager, manager.TotalTokens())
 	if err != nil {
-		t.Fatalf("CompactIfNeeded() error = %v", err)
+		t.Fatalf("compactIfNeeded() error = %v", err)
 	}
 	if decision.Action != CompactionActionMicro || decision.Result.SourceEntryIDs[0] != "tool-large" {
 		t.Fatalf("decision = %+v, want largest TOOL_RESULT MicroCompact", decision)
@@ -376,9 +380,9 @@ func TestCompactionSchedulerRunsSessionOnlyWhenEstimateReachesTarget(t *testing.
 			}
 		}
 		scheduler := mustScheduler(t, 1333, &recordingTranscriptStore{})
-		decision, err := scheduler.CompactIfNeeded(context.Background(), manager)
+		decision, err := scheduler.compactIfNeeded(context.Background(), manager, manager.TotalTokens())
 		if err != nil {
-			t.Fatalf("CompactIfNeeded() error = %v", err)
+			t.Fatalf("compactIfNeeded() error = %v", err)
 		}
 		if decision.Action != CompactionActionSession || decision.Result.Kind != CompactionSession {
 			t.Fatalf("decision = %+v, want SessionCompact", decision)
@@ -399,9 +403,9 @@ func TestCompactionSchedulerRunsSessionOnlyWhenEstimateReachesTarget(t *testing.
 			}
 		}
 		scheduler := mustScheduler(t, 1000, &recordingTranscriptStore{})
-		decision, err := scheduler.CompactIfNeeded(context.Background(), manager)
+		decision, err := scheduler.compactIfNeeded(context.Background(), manager, manager.TotalTokens())
 		if err != nil {
-			t.Fatalf("CompactIfNeeded() error = %v", err)
+			t.Fatalf("compactIfNeeded() error = %v", err)
 		}
 		if decision.Action != CompactionActionNone || !strings.Contains(decision.Reason, "exceeds target") {
 			t.Fatalf("decision = %+v, want deferred SessionCompact", decision)
@@ -425,9 +429,9 @@ func TestCompactionSchedulerRunsDirectFullAtEightyFivePercent(t *testing.T) {
 		}
 	}
 	scheduler := mustScheduler(t, 1000, &recordingTranscriptStore{})
-	decision, err := scheduler.CompactIfNeeded(context.Background(), manager)
+	decision, err := scheduler.compactIfNeeded(context.Background(), manager, manager.TotalTokens())
 	if err != nil {
-		t.Fatalf("CompactIfNeeded() error = %v", err)
+		t.Fatalf("compactIfNeeded() error = %v", err)
 	}
 	if decision.Action != CompactionActionFull || decision.Emergency {
 		t.Fatalf("decision = %+v, want non-emergency FullCompact", decision)
@@ -457,9 +461,9 @@ func TestCompactionSchedulerEmergencyFallsBackToMicro(t *testing.T) {
 		}
 	}
 	scheduler := mustScheduler(t, 1000, &recordingTranscriptStore{})
-	decision, err := scheduler.CompactIfNeeded(context.Background(), manager)
+	decision, err := scheduler.compactIfNeeded(context.Background(), manager, manager.TotalTokens())
 	if err != nil {
-		t.Fatalf("CompactIfNeeded() error = %v", err)
+		t.Fatalf("compactIfNeeded() error = %v", err)
 	}
 	if decision.Action != CompactionActionMicro || !decision.Emergency {
 		t.Fatalf("decision = %+v, want emergency Micro fallback", decision)

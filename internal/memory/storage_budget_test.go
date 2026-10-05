@@ -3,6 +3,8 @@ package memory
 import (
 	"context"
 	"errors"
+	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -15,6 +17,50 @@ func storageTestScheduler(t *testing.T, generator CompactionGenerator, transcrip
 	}
 	scheduler.storageBudget = budget
 	return scheduler
+}
+
+func TestStorageBudgetEvictsLeastRecentlyUsedFactsAndPersistsRemoval(t *testing.T) {
+	root := t.TempDir()
+	store, err := NewMarkdownFactStore(filepath.Join(root, "project.md"), filepath.Join(root, "user.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	manager, err := NewManagerWithFactStore(nil, store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, key := range []string{"one", "two", "three"} {
+		if _, err := manager.UpsertFact(FactScopeProject, key, key, Metadata{}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if !manager.TouchFact("PROJECT:one") {
+		t.Fatal("TouchFact() did not find fact")
+	}
+	for _, entry := range compactTestTurn(t, 1, false) {
+		if err := manager.AddEntry(entry); err != nil {
+			t.Fatal(err)
+		}
+	}
+	scheduler := storageTestScheduler(t, &fakeCompactionGenerator{summaryContent: validSummaryContent()}, &recordingTranscriptStore{},
+		StorageBudget{MaxEntries: 4, TargetEntries: 3, MaxBytes: 1 << 20, TargetBytes: 1 << 19, MaxFacts: 1})
+	decisions, err := scheduler.EnforceStorageBudget(context.Background(), manager)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(decisions) != 2 || decisions[0].Result.SourceEntryIDs[0] != "PROJECT:two" || decisions[1].Result.SourceEntryIDs[0] != "PROJECT:three" {
+		t.Fatalf("LRU eviction decisions = %+v", decisions)
+	}
+	if got := entryContents(manager.Facts()); !reflect.DeepEqual(got, []string{"one"}) {
+		t.Fatalf("remaining facts = %v", got)
+	}
+	reloaded, err := NewManagerWithFactStore(nil, store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := entryContents(reloaded.Facts()); !reflect.DeepEqual(got, []string{"one"}) {
+		t.Fatalf("persisted facts after eviction = %v", got)
+	}
 }
 
 func storageTestTurns(t *testing.T, manager *Manager, count int) {
@@ -36,7 +82,7 @@ func TestStorageBudgetCompressesBeforeEvicting(t *testing.T) {
 	}
 	transcript := &recordingTranscriptStore{}
 	generator := &fakeCompactionGenerator{summaryContent: validSummaryContent()}
-	scheduler := storageTestScheduler(t, generator, transcript, StorageBudget{MaxEntries: 6, TargetEntries: 4, MaxBytes: 1 << 20, TargetBytes: 1 << 19})
+	scheduler := storageTestScheduler(t, generator, transcript, StorageBudget{MaxEntries: 5, TargetEntries: 4, MaxBytes: 1 << 20, TargetBytes: 1 << 19, MaxFacts: 512})
 	decisions, err := scheduler.EnforceStorageBudget(context.Background(), manager)
 	if err != nil {
 		t.Fatal(err)
@@ -58,7 +104,7 @@ func TestStorageBudgetEvictsArchivedSummaryAfterCompression(t *testing.T) {
 	storageTestTurns(t, manager, 3)
 	transcript := &recordingTranscriptStore{}
 	scheduler := storageTestScheduler(t, &fakeCompactionGenerator{summaryContent: validSummaryContent()}, transcript,
-		StorageBudget{MaxEntries: 5, TargetEntries: 2, MaxBytes: 1 << 20, TargetBytes: 1 << 19})
+		StorageBudget{MaxEntries: 5, TargetEntries: 2, MaxBytes: 1 << 20, TargetBytes: 1 << 19, MaxFacts: 512})
 	decisions, err := scheduler.EnforceStorageBudget(context.Background(), manager)
 	if err != nil {
 		t.Fatal(err)
@@ -80,7 +126,7 @@ func TestStorageBudgetDoesNotEvictOnCompressionFailure(t *testing.T) {
 	storageTestTurns(t, manager, 3)
 	transcript := &recordingTranscriptStore{}
 	scheduler := storageTestScheduler(t, &fakeCompactionGenerator{err: errors.New("model unavailable")}, transcript,
-		StorageBudget{MaxEntries: 5, TargetEntries: 2, MaxBytes: 1 << 20, TargetBytes: 1 << 19})
+		StorageBudget{MaxEntries: 5, TargetEntries: 2, MaxBytes: 1 << 20, TargetBytes: 1 << 19, MaxFacts: 512})
 	_, err := scheduler.EnforceStorageBudget(context.Background(), manager)
 	if err == nil || !strings.Contains(err.Error(), "model unavailable") {
 		t.Fatalf("error = %v", err)
@@ -97,12 +143,16 @@ func TestStorageBudgetProtectsNewestTurn(t *testing.T) {
 		t.Fatal(err)
 	}
 	transcript := &recordingTranscriptStore{}
+	before := manager.StorageUsage()
 	scheduler := storageTestScheduler(t, &fakeCompactionGenerator{summaryContent: validSummaryContent()}, transcript,
-		StorageBudget{MaxEntries: 2, TargetEntries: 1, MaxBytes: 1 << 20, TargetBytes: 1 << 19})
-	_, err := scheduler.EnforceStorageBudget(context.Background(), manager)
-	var exceeded *StorageBudgetExceededError
-	if !errors.As(err, &exceeded) || manager.Len() != 2 || len(transcript.batches) != 0 {
-		t.Fatalf("error = %v, entries = %d", err, manager.Len())
+		StorageBudget{MaxEntries: 10, TargetEntries: 5, MaxBytes: before.Bytes - 1, TargetBytes: before.Bytes / 2, MaxFacts: 512})
+	decisions, err := scheduler.EnforceStorageBudget(context.Background(), manager)
+	var budgetErr *StorageBudgetExceededError
+	if !errors.As(err, &budgetErr) || manager.Len() != 2 || manager.FactLen() != 1 || len(transcript.batches) != 0 {
+		t.Fatalf("error = %v, entries = %d, facts = %d", err, manager.Len(), manager.FactLen())
+	}
+	if len(decisions) != 0 {
+		t.Fatalf("decisions = %+v", decisions)
 	}
 }
 
@@ -111,7 +161,7 @@ func TestStorageBudgetDoesNotEvictWhenArchiveFails(t *testing.T) {
 	storageTestTurns(t, manager, 3)
 	transcript := &recordingTranscriptStore{err: errors.New("disk unavailable")}
 	scheduler := storageTestScheduler(t, &fakeCompactionGenerator{summaryContent: validSummaryContent()}, transcript,
-		StorageBudget{MaxEntries: 5, TargetEntries: 2, MaxBytes: 1 << 20, TargetBytes: 1 << 19})
+		StorageBudget{MaxEntries: 5, TargetEntries: 2, MaxBytes: 1 << 20, TargetBytes: 1 << 19, MaxFacts: 512})
 	_, err := scheduler.EnforceStorageBudget(context.Background(), manager)
 	if err == nil || !strings.Contains(err.Error(), "disk unavailable") || manager.Len() != 6 {
 		t.Fatalf("error = %v, entries = %d", err, manager.Len())
@@ -127,7 +177,7 @@ func TestStorageBudgetCanTriggerOnEstimatedBytes(t *testing.T) {
 	}
 	transcript := &recordingTranscriptStore{}
 	scheduler := storageTestScheduler(t, &fakeCompactionGenerator{summaryContent: validSummaryContent()}, transcript,
-		StorageBudget{MaxEntries: 20, TargetEntries: 15, MaxBytes: before.Bytes - 1, TargetBytes: before.Bytes / 2})
+		StorageBudget{MaxEntries: 20, TargetEntries: 15, MaxBytes: before.Bytes - 1, TargetBytes: before.Bytes / 2, MaxFacts: 512})
 	decisions, err := scheduler.EnforceStorageBudget(context.Background(), manager)
 	if err != nil {
 		t.Fatal(err)

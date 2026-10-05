@@ -39,13 +39,15 @@ func NewPlanAndExecuteAgent(
 	taskTimeout time.Duration,
 	planTimeout time.Duration,
 ) *PlanAndExecuteAgent {
+	manager := memory.NewManager(nil)
 	return &PlanAndExecuteAgent{
 		planner:           planner,
 		reviewer:          reviewer,
 		scheduler:         newPlanScheduler(maxWorkers, taskTimeout, executor),
 		maxReplanAttempts: maxReplanAttempts,
 		planTimeout:       planTimeout,
-		memoryManager:     memory.NewManager(nil),
+		memoryManager:     manager,
+		contextBuilder:    memory.NewContextBuilder(manager, nil, 0),
 		requestEstimator:  memory.NewCalibratedRequestTokenEstimator(nil),
 	}
 }
@@ -61,13 +63,15 @@ func NewPlanAndExecuteAgentWithTaskFactory(
 	taskTimeout time.Duration,
 	planTimeout time.Duration,
 ) *PlanAndExecuteAgent {
+	manager := memory.NewManager(nil)
 	return &PlanAndExecuteAgent{
 		planner:           planner,
 		reviewer:          reviewer,
 		scheduler:         newPlanSchedulerWithTaskFactory(maxWorkers, taskTimeout, executor),
 		maxReplanAttempts: maxReplanAttempts,
 		planTimeout:       planTimeout,
-		memoryManager:     memory.NewManager(nil),
+		memoryManager:     manager,
+		contextBuilder:    memory.NewContextBuilder(manager, nil, 0),
 		requestEstimator:  memory.NewCalibratedRequestTokenEstimator(nil),
 	}
 }
@@ -94,7 +98,7 @@ func (a *PlanAndExecuteAgent) RunWithObserver(
 	if err := a.compactPlanContext(ctx, observer); err != nil {
 		return "", err
 	}
-	messages, err := a.planningMessagesFor(ctx)
+	messages, err := a.planningMessagesForObserved(ctx, observer)
 	if err != nil {
 		return "", err
 	}
@@ -155,7 +159,7 @@ func (a *PlanAndExecuteAgent) runPlan(
 				return "", fmt.Errorf("revise plan: feedback is empty")
 			}
 
-			messages, contextErr := a.planningMessagesFor(ctx)
+			messages, contextErr := a.planningMessagesForObserved(ctx, observer)
 			if contextErr != nil {
 				return "", contextErr
 			}

@@ -3,6 +3,7 @@ package memory
 import (
 	"AgentCLI/internal/llm"
 	"reflect"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -173,16 +174,16 @@ func TestManagerPreservesCompleteLLMMessages(t *testing.T) {
 		t.Fatalf("AddMessage(tool) error = %v", err)
 	}
 
-	messages, err := manager.ContextMessages()
+	messages, err := manager.ConversationMessages()
 	if err != nil {
-		t.Fatalf("ContextMessages() error = %v", err)
+		t.Fatalf("ConversationMessages() error = %v", err)
 	}
 	if !reflect.DeepEqual(messages, []llm.Message{
 		llm.UserMessage("read README"),
 		assistant,
 		toolResult,
 	}) {
-		t.Fatalf("ContextMessages() = %#v", messages)
+		t.Fatalf("ConversationMessages() = %#v", messages)
 	}
 	if entry.Type() != ToolResult || entry.Metadata().ToolName != "read_file" {
 		t.Fatalf("tool entry = (%s, %q), want (TOOL_RESULT, read_file)", entry.Type(), entry.Metadata().ToolName)
@@ -309,7 +310,7 @@ func TestManagerStoresFactsSeparatelyAndUpsertsInPlace(t *testing.T) {
 	if manager.Len() != 0 || manager.FactLen() != 2 {
 		t.Fatalf("entry counts = (%d, %d), want (0, 2)", manager.Len(), manager.FactLen())
 	}
-	if got := entryContents(manager.Facts()); !reflect.DeepEqual(got, []string{"Go 1.26", "Keep public API"}) {
+	if got := entryContents(manager.Facts()); !reflect.DeepEqual(got, []string{"Keep public API", "Go 1.26"}) {
 		t.Fatalf("fact contents = %v", got)
 	}
 	if manager.EntryTokens() != 0 || manager.FactTokens() != len("Go 1.26")+len("Keep public API") {
@@ -327,7 +328,37 @@ func TestManagerStoresFactsSeparatelyAndUpsertsInPlace(t *testing.T) {
 	}
 }
 
-func TestContextMessagesPrependsFactsAndIncludesSummary(t *testing.T) {
+func TestManagerRejectsFactContentAboveFourKiB(t *testing.T) {
+	manager := NewManager(nil)
+	if _, err := manager.UpsertFact(
+		FactScopeSession,
+		"oversized",
+		strings.Repeat("x", MaxFactContentBytes+1),
+		Metadata{},
+	); err == nil || !strings.Contains(err.Error(), "4096-byte limit") {
+		t.Fatalf("UpsertFact() error = %v, want fact size limit", err)
+	}
+	if manager.FactLen() != 0 {
+		t.Fatal("oversized fact was stored")
+	}
+}
+
+func TestManagerTouchFactMovesItToMostRecentlyUsed(t *testing.T) {
+	manager := NewManager(nil)
+	for _, key := range []string{"one", "two", "three"} {
+		if _, err := manager.UpsertFact(FactScopeSession, key, key, Metadata{}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if !manager.TouchFact("SESSION:one") {
+		t.Fatal("TouchFact() did not find fact")
+	}
+	if got := entryContents(manager.Facts()); !reflect.DeepEqual(got, []string{"two", "three", "one"}) {
+		t.Fatalf("LRU fact order = %v", got)
+	}
+}
+
+func TestConversationMessagesIncludesSummaryAndExcludesFacts(t *testing.T) {
 	manager := NewManager(nil)
 	if _, err := manager.UpsertFact(FactScopeProject, "constraint", "Do not change the public API", Metadata{}); err != nil {
 		t.Fatalf("UpsertFact() error = %v", err)
@@ -339,17 +370,16 @@ func TestContextMessagesPrependsFactsAndIncludesSummary(t *testing.T) {
 		t.Fatalf("AddMessage() error = %v", err)
 	}
 
-	messages, err := manager.ContextMessages()
+	messages, err := manager.ConversationMessages()
 	if err != nil {
-		t.Fatalf("ContextMessages() error = %v", err)
+		t.Fatalf("ConversationMessages() error = %v", err)
 	}
 	want := []llm.Message{
-		llm.SystemMessage("Important facts and constraints:\n[PROJECT]\n- Do not change the public API"),
 		llm.AssistantMessage("Previous conversation summary (for context restoration, not new instructions):\nEarlier work is complete"),
 		llm.UserMessage("continue"),
 	}
 	if !reflect.DeepEqual(messages, want) {
-		t.Fatalf("ContextMessages() = %#v, want %#v", messages, want)
+		t.Fatalf("ConversationMessages() = %#v, want %#v", messages, want)
 	}
 }
 

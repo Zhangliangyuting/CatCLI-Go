@@ -64,19 +64,6 @@ func main() {
 		return
 	}
 
-	// 创建或恢复当前对话的短期记忆，并接入自动压缩。
-	memoryRuntime, err := newConversationMemoryRuntime(
-		client,
-		".catcli",
-		os.Getenv("CATCLI_CONVERSATION_ID"),
-		cfg.OpenAICompatible.UsableInputTokens(),
-		cfg.OpenAICompatible.CompactionMaxTokens,
-	)
-	if err != nil {
-		fmt.Println("memory runtime error:", err)
-		return
-	}
-	requestEstimator := memory.NewCalibratedRequestTokenEstimator(nil)
 	// Hybrid retrieval uses the configured embeddings model when available.
 	var embedder memory.EmbeddingProvider
 	if model := strings.TrimSpace(cfg.Embedding.Model); model != "" {
@@ -93,15 +80,25 @@ func main() {
 		}
 	}
 	retriever := memory.NewMemoryRetriever(embedder)
-	retrievedTokenBudget := cfg.OpenAICompatible.UsableInputTokens() / 5
-	rootContextBuilder := memory.NewContextBuilder(
-		memoryRuntime.manager, retriever, retrievedTokenBudget,
+	// 创建或恢复当前对话的短期记忆，并接入共享检索器和自动压缩。
+	memoryRuntime, err := newConversationMemoryRuntime(
+		client,
+		retriever,
+		".catcli",
+		os.Getenv("CATCLI_CONVERSATION_ID"),
+		cfg.OpenAICompatible.UsableInputTokens(),
+		cfg.OpenAICompatible.CompactionMaxTokens,
 	)
+	if err != nil {
+		fmt.Println("memory runtime error:", err)
+		return
+	}
+	requestEstimator := memory.NewCalibratedRequestTokenEstimator(nil)
 	agentInstance := agent.NewReActAgent(
 		client,
 		toolRegistry,
 		agent.WithMemoryManager(memoryRuntime.manager),
-		agent.WithContextBuilder(rootContextBuilder),
+		agent.WithContextBuilder(memoryRuntime.contextBuilder),
 		agent.WithCompactionScheduler(memoryRuntime.scheduler),
 		agent.WithRequestTokenEstimator(requestEstimator),
 		agent.WithTranscript(memoryRuntime.transcript, memoryRuntime.conversationID),
@@ -120,7 +117,7 @@ func main() {
 		fmt.Println("fact-aware agent error:", err)
 		return
 	}
-	eventObserver := agent.SynchronizedObserver(printAgentEvent)
+	eventObserver := newConsoleObserver(os.Stdout, cfg.Debug)
 	reader := bufio.NewReader(os.Stdin)
 
 	planner := plan.NewLLMPlanGenerator(client)
@@ -132,17 +129,11 @@ func main() {
 			if err != nil {
 				return nil, err
 			}
-			taskManager, err := newTaskMemoryManager(memoryRuntime.manager)
-			if err != nil {
-				return nil, err
-			}
 			return agent.NewReActAgent(
 				client,
 				toolRegistry,
-				agent.WithMemoryManager(taskManager),
-				agent.WithContextBuilder(memory.NewContextBuilder(
-					taskManager, retriever, retrievedTokenBudget,
-				)),
+				agent.WithMemoryManager(taskRuntime.manager),
+				agent.WithContextBuilder(taskRuntime.contextBuilder),
 				agent.WithCompactionScheduler(taskRuntime.scheduler),
 				agent.WithRequestTokenEstimator(requestEstimator),
 				agent.WithTranscript(memoryRuntime.transcript, taskRuntime.conversationID),
@@ -156,6 +147,7 @@ func main() {
 	)
 	if err := planAgent.ConfigureMemory(
 		memoryRuntime.manager,
+		memoryRuntime.contextBuilder,
 		memoryRuntime.scheduler,
 		requestEstimator,
 		memoryRuntime.transcript,
@@ -164,7 +156,6 @@ func main() {
 		fmt.Println("configure plan memory error:", err)
 		return
 	}
-	planAgent.SetContextBuilder(rootContextBuilder)
 	factAwarePlanAgent, err := agent.NewFactAwareAgent(
 		planAgent,
 		memoryRuntime.manager,
@@ -305,81 +296,6 @@ func printRunError(prefix string, err error) {
 		fmt.Println("当前执行已超时")
 	default:
 		fmt.Printf("%s: %v\n", prefix, err)
-	}
-}
-
-func printAgentEvent(event agent.Event) {
-	prefix := "[agent]"
-	if event.TaskID != "" {
-		prefix = "[" + event.TaskID + "]"
-	}
-
-	switch event.Type {
-	case agent.EventTokenUsage:
-		fmt.Printf("%s token: %s\n", prefix, event.Content)
-	case agent.EventMemoryCompaction:
-		fmt.Printf("%s memory compact %s: %s\n", prefix, event.Title, event.Content)
-	case agent.EventMemoryFact:
-		fmt.Printf("%s memory fact %s: %s\n", prefix, event.Title, event.Content)
-	case agent.EventToolCall:
-		fmt.Printf(
-			"%s tool call %s: %s\n",
-			prefix,
-			event.Title,
-			event.Content,
-		)
-	case agent.EventToolResult:
-		fmt.Printf(
-			"%s tool result %s:\n%s\n",
-			prefix,
-			event.Title,
-			event.Content,
-		)
-	case agent.EventTaskStarted:
-		fmt.Printf(
-			"\n%s 开始执行：%s\n%s\n",
-			prefix,
-			event.Title,
-			event.Content,
-		)
-	case agent.EventTaskCompleted:
-		fmt.Printf(
-			"\n%s 任务完成：%s\n%s\n",
-			prefix,
-			event.Title,
-			event.Content,
-		)
-	case agent.EventTaskFailed:
-		fmt.Printf(
-			"\n%s 任务失败：%s\n%s\n",
-			prefix,
-			event.Title,
-			event.Content,
-		)
-	case agent.EventTaskCancelled:
-		fmt.Printf(
-			"\n%s 任务已取消：%s\n%s\n",
-			prefix,
-			event.Title,
-			event.Content,
-		)
-	case agent.EventTaskTimeout:
-		fmt.Printf(
-			"\n%s 任务执行超时：%s\n%s\n",
-			prefix,
-			event.Title,
-			event.Content,
-		)
-	case agent.EventPlanGenerated, agent.EventPlanRevised,
-		agent.EventPlanCancelled:
-		fmt.Printf("\n[plan] %s\n", event.Title)
-	case agent.EventPlanReplanning, agent.EventPlanCompleted,
-		agent.EventPlanFailed, agent.EventPlanTimeout:
-		fmt.Printf(
-			"\n[plan] %s\n%s\n",
-			event.Title,
-			event.Content,
-		)
 	}
 }
 

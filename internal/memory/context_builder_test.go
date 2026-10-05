@@ -47,14 +47,16 @@ func TestContextBuilderRetrievesFactsAndOlderActiveTurns(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(messages) != 5 || messages[0].Role != "system" || messages[1].Role != "assistant" {
+	if len(messages) != 4 || messages[0].Role != "assistant" {
 		t.Fatalf("messages = %#v", messages)
 	}
-	if !strings.Contains(messages[0].Content, "Answer in Chinese") || !strings.Contains(messages[0].Content, "Prefer brief replies") {
-		t.Fatalf("SESSION or USER fact missing: %#v", messages)
+	for _, message := range messages {
+		if strings.Contains(message.Content, "Answer in Chinese") || strings.Contains(message.Content, "Prefer brief replies") {
+			t.Fatalf("unrelated SESSION or USER fact was injected: %#v", messages)
+		}
 	}
-	if !strings.Contains(messages[1].Content, "docs/deploy.md") || strings.Contains(messages[1].Content, "project uses Go") {
-		t.Fatalf("older active turn selection = %#v", messages[1])
+	if !strings.Contains(messages[0].Content, "docs/deploy.md") || strings.Contains(messages[0].Content, "project uses Go") {
+		t.Fatalf("older active turn selection = %#v", messages[0])
 	}
 	if got := messages[len(messages)-1]; !reflect.DeepEqual(got, current) {
 		t.Fatalf("current user message = %#v", got)
@@ -107,6 +109,9 @@ func TestContextBuilderPreservesRecentToolProtocol(t *testing.T) {
 	if len(messages) != 7 || messages[0].Role != "system" || messages[1].Role != "assistant" {
 		t.Fatalf("messages = %#v", messages)
 	}
+	if strings.Contains(messages[0].Content, "请使用中文") {
+		t.Fatalf("unrelated USER fact was injected: %#v", messages[0])
+	}
 	if !strings.Contains(messages[1].Content, "scripts/deploy.sh") {
 		t.Fatalf("older tool turn not retrieved: %#v", messages[1])
 	}
@@ -120,11 +125,130 @@ func TestContextBuilderPreservesRecentToolProtocol(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(limited) != 6 || !strings.Contains(limited[0].Content, "请使用中文") || strings.Contains(limited[0].Content, "scripts/deploy.sh") {
+	if len(limited) != 5 {
 		t.Fatalf("retrieval budget not applied: %#v", limited)
 	}
-	if !reflect.DeepEqual(limited[1:], wantRecent) {
-		t.Fatalf("recent protocol changed under retrieval budget: %#v", limited[1:])
+	if !reflect.DeepEqual(limited, wantRecent) {
+		t.Fatalf("recent protocol changed under retrieval budget: %#v", limited)
+	}
+}
+
+func TestContextBuilderLimitsFactsAndOlderContextSeparately(t *testing.T) {
+	manager := NewManager(nil)
+	for _, fact := range []struct {
+		scope        FactScope
+		key, content string
+	}{
+		{FactScopeSession, "one", "deploy fact one"},
+		{FactScopeUser, "two", "deploy fact two"},
+		{FactScopeProject, "three", "deploy fact three"},
+		{FactScopeProject, "unrelated", "database SQLite"},
+	} {
+		if _, err := manager.UpsertFact(fact.scope, fact.key, fact.content, Metadata{}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	addTestTurn(t, manager, "deploy old turn one", "completed one")
+	addTestTurn(t, manager, "deploy old turn two", "completed two")
+	addTestTurn(t, manager, "recent status", "ready")
+	if _, err := manager.AddMessage(llm.UserMessage("deploy"), ""); err != nil {
+		t.Fatal(err)
+	}
+
+	builder := NewContextBuilder(manager, NewMemoryRetriever(nil), 1000)
+	builder.MaxFactResults = 2
+	builder.MaxContextResults = 1
+	messages, err := builder.Build(context.Background(), "deploy")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(messages) != 5 || messages[0].Role != "system" || messages[1].Role != "assistant" {
+		t.Fatalf("messages = %#v", messages)
+	}
+	if strings.Count(messages[0].Content, "deploy fact") != 2 || strings.Contains(messages[0].Content, "SQLite") {
+		t.Fatalf("fact quota or relevance failed: %#v", messages[0])
+	}
+	if !strings.Contains(messages[1].Content, "old turn one") || strings.Contains(messages[1].Content, "old turn two") {
+		t.Fatalf("context quota failed: %#v", messages[1])
+	}
+}
+
+func TestContextBuilderSharedBudgetGivesBothCategoriesSpace(t *testing.T) {
+	manager := NewManager(TokenCounterFunc(func(content string) int { return len([]rune(content)) }))
+	for _, key := range []string{"one", "two", "three"} {
+		if _, err := manager.UpsertFact(FactScopeProject, key, "deploy "+key, Metadata{}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	addTestTurn(t, manager, "deploy", "done")
+	addTestTurn(t, manager, "recent status", "ready")
+	if _, err := manager.AddMessage(llm.UserMessage("deploy"), ""); err != nil {
+		t.Fatal(err)
+	}
+
+	builder := NewContextBuilder(manager, NewMemoryRetriever(nil), 60)
+	messages, err := builder.Build(context.Background(), "deploy")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(messages) != 5 || messages[0].Role != "system" || messages[1].Role != "assistant" {
+		t.Fatalf("facts crowded out older conversation: %#v", messages)
+	}
+}
+
+func TestContextBuilderReportsMatchesAndIncludedDocuments(t *testing.T) {
+	manager := NewManager(TokenCounterFunc(func(content string) int { return len([]rune(content)) }))
+	if _, err := manager.UpsertFact(FactScopeProject, "deploy", "deploy fact", Metadata{}); err != nil {
+		t.Fatal(err)
+	}
+	addTestTurn(t, manager, "deploy", "done")
+	addTestTurn(t, manager, "recent", "ready")
+	if _, err := manager.AddMessage(llm.UserMessage("deploy"), ""); err != nil {
+		t.Fatal(err)
+	}
+	builder := NewContextBuilder(manager, NewMemoryRetriever(nil), 19)
+	var report RetrievalReport
+	calls := 0
+	_, err := builder.BuildWithReport(context.Background(), "deploy", func(got RetrievalReport) {
+		report = got
+		calls++
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if calls != 1 || len(report.FactMatches) != 1 || len(report.ContextMatches) != 1 ||
+		len(report.IncludedFacts) != 1 || len(report.IncludedContext) != 0 {
+		t.Fatalf("unexpected retrieval report: %#v (calls=%d)", report, calls)
+	}
+	if report.FactMatches[0].Kind != Fact || report.FactMatches[0].Scope != FactScopeProject ||
+		report.ContextMatches[0].Kind != Conversation {
+		t.Fatalf("wrong document metadata: %#v", report)
+	}
+}
+
+func TestContextBuilderTouchesOnlyFactsIncludedByTokenBudget(t *testing.T) {
+	counter := TokenCounterFunc(func(content string) int { return len([]rune(content)) })
+	manager := NewManager(counter)
+	for _, fact := range []struct {
+		key, content string
+	}{
+		{key: "primary", content: "deploy primary"},
+		{key: "secondary", content: "deploy secondary"},
+	} {
+		if _, err := manager.UpsertFact(FactScopeSession, fact.key, fact.content, Metadata{}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	builder := NewContextBuilder(manager, NewMemoryRetriever(nil), counter.Count("deploy primary")+8)
+	var report RetrievalReport
+	if _, err := builder.BuildWithReport(context.Background(), "deploy", func(got RetrievalReport) { report = got }); err != nil {
+		t.Fatal(err)
+	}
+	if len(report.IncludedFacts) != 1 || report.IncludedFacts[0].ID != "SESSION:primary" {
+		t.Fatalf("included facts = %#v", report.IncludedFacts)
+	}
+	if got := entryContents(manager.Facts()); !reflect.DeepEqual(got, []string{"deploy secondary", "deploy primary"}) {
+		t.Fatalf("fact LRU order = %v", got)
 	}
 }
 

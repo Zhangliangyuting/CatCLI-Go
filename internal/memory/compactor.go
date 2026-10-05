@@ -8,6 +8,7 @@ import (
 const (
 	sessionCompactTurns  = 4
 	fullCompactKeepTurns = 1
+	fullCompactMaxUnits  = 8
 )
 
 // CompactionGenerator produces validated semantic content. Implementations may
@@ -170,8 +171,10 @@ func sessionCompactSources(entries []Entry) ([]Entry, bool, error) {
 	return sources, true, nil
 }
 
-// FullCompact replaces the safe historical prefix with one FULL summary while
-// retaining the most recent user turn verbatim.
+// FullCompact replaces up to eight eligible historical units after the latest
+// FULL summary while retaining that FULL summary and the most recent raw turn.
+// SESSION summaries may be promoted into a FULL summary once; FULL summaries
+// are never recursively summarized.
 func (c *Compactor) FullCompact(
 	ctx context.Context,
 	manager *Manager,
@@ -190,27 +193,30 @@ func (c *Compactor) FullCompact(
 	if len(units) == 0 {
 		return CompactionResult{}, false, nil
 	}
-	rawUnitIndexes := make([]int, 0)
+	startUnit := 0
 	for index, unit := range units {
-		if entries[unit.start].Type() != Summary {
-			rawUnitIndexes = append(rawUnitIndexes, index)
+		entry := entries[unit.start]
+		if entry.Type() == Summary && entry.Metadata().Compaction.Kind == CompactionFull {
+			startUnit = index + 1
 		}
 	}
-	endUnit := len(units)
-	if len(rawUnitIndexes) >= fullCompactKeepTurns {
-		endUnit = rawUnitIndexes[len(rawUnitIndexes)-fullCompactKeepTurns]
-	}
-	if endUnit == 0 {
+	// Keep the newest raw turn verbatim. Nothing before startUnit is selected,
+	// so the latest FULL summary remains an independent retrieval document.
+	endUnit := len(units) - fullCompactKeepTurns
+	if endUnit <= startUnit {
 		return CompactionResult{}, false, nil
 	}
-	lastSourceUnit := units[endUnit-1]
-	if !lastSourceUnit.complete {
-		return CompactionResult{}, false, nil
+	if endUnit-startUnit > fullCompactMaxUnits {
+		endUnit = startUnit + fullCompactMaxUnits
 	}
-	sources := append([]Entry(nil), entries[:lastSourceUnit.end]...)
-	if len(sources) == 1 && sources[0].Type() == Summary {
-		return CompactionResult{}, false, nil
+	selectedUnits := units[startUnit:endUnit]
+	for _, unit := range selectedUnits {
+		entry := entries[unit.start]
+		if !unit.complete || (entry.Type() == Summary && entry.Metadata().Compaction.Kind != CompactionSession) {
+			return CompactionResult{}, false, nil
+		}
 	}
+	sources := append([]Entry(nil), entries[selectedUnits[0].start:selectedUnits[len(selectedUnits)-1].end]...)
 	result, err := c.summarizeAndCommit(ctx, manager, CompactionFull, sources)
 	if err != nil {
 		return CompactionResult{}, false, err

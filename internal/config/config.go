@@ -13,6 +13,7 @@ import (
 
 type Config struct {
 	ConfigFile       string                 `mapstructure:"-"`
+	Debug            bool                   `mapstructure:"debug"`
 	OpenAICompatible OpenAICompatibleConfig `mapstructure:"openai_compatible"`
 	Embedding        EmbeddingConfig        `mapstructure:"embedding"`
 	Agent            AgentConfig            `mapstructure:"agent"`
@@ -71,6 +72,9 @@ func Load() (Config, error) {
 	v.AutomaticEnv()
 
 	if err := v.BindEnv("openai_compatible.api_key"); err != nil {
+		return Config{}, err
+	}
+	if err := v.BindEnv("debug"); err != nil {
 		return Config{}, err
 	}
 
@@ -153,6 +157,7 @@ func defaultConfig() Config {
 }
 
 func setDefaults(v *viper.Viper, cfg Config) {
+	v.SetDefault("debug", cfg.Debug)
 	v.SetDefault("openai_compatible.base_url", cfg.OpenAICompatible.BaseURL)
 	v.SetDefault("openai_compatible.model", cfg.OpenAICompatible.Model)
 	v.SetDefault("openai_compatible.context_window_tokens", cfg.OpenAICompatible.ContextWindowTokens)

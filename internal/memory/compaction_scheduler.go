@@ -146,22 +146,13 @@ func NewCompactionScheduler(
 	}, nil
 }
 
-// CompactToFit performs bounded, progressive compaction before one model
-// request. It re-measures after every operation and aims for SessionTarget as a
-// low-water mark. If safe compaction is exhausted while the hard input budget
-// is still exceeded, it returns ContextBudgetExceededError.
+// CompactToFit performs bounded, progressive compaction before one
+// model request. The supplied measurer must return the complete logical request
+// size, including memory, system prompts, tool definitions, and other messages.
+// It re-measures after every operation and aims for SessionTarget as a low-water
+// mark. If safe compaction is exhausted while the hard input budget is still
+// exceeded, it returns ContextBudgetExceededError.
 func (scheduler *CompactionScheduler) CompactToFit(
-	ctx context.Context,
-	manager *Manager,
-) ([]CompactionDecision, error) {
-	return scheduler.CompactToFitMeasured(ctx, manager, func() (int, error) {
-		return manager.TotalTokens(), nil
-	})
-}
-
-// CompactToFitMeasured behaves like CompactToFit, but bases thresholds and the
-// hard limit on a complete logical request rather than only Manager entries.
-func (scheduler *CompactionScheduler) CompactToFitMeasured(
 	ctx context.Context,
 	manager *Manager,
 	measure ContextTokenMeasurer,
@@ -176,10 +167,7 @@ func (scheduler *CompactionScheduler) CompactToFitMeasured(
 		return nil, fmt.Errorf("context token measurer is nil")
 	}
 
-	decisions, err := scheduler.EnforceStorageBudget(ctx, manager)
-	if err != nil {
-		return decisions, err
-	}
+	var decisions []CompactionDecision
 	successfulCompactions := 0
 	attempts := 0
 	attemptLimit := scheduler.config.MaxCompactionsPerRequest + extraStrategyAttempts
@@ -231,7 +219,7 @@ func (scheduler *CompactionScheduler) CompactToFitMeasured(
 				"FullCompact was ineffective; trying an eligible TOOL_RESULT",
 			)
 		default:
-			decision, err = scheduler.compactIfNeededAtTokens(ctx, manager, beforeTokens)
+			decision, err = scheduler.compactIfNeeded(ctx, manager, beforeTokens)
 		}
 		attempts++
 		if err != nil {
@@ -315,23 +303,7 @@ func (scheduler *CompactionScheduler) CompactToFitMeasured(
 	return decisions, nil
 }
 
-// CompactIfNeeded evaluates current total memory usage and performs at most one
-// compaction. Calling it before each model request makes the policy incremental
-// and prevents an unbounded sequence of extra LLM calls in one scheduling pass.
-func (scheduler *CompactionScheduler) CompactIfNeeded(
-	ctx context.Context,
-	manager *Manager,
-) (CompactionDecision, error) {
-	if scheduler == nil || scheduler.compactor == nil {
-		return CompactionDecision{}, fmt.Errorf("compaction scheduler is nil")
-	}
-	if manager == nil {
-		return CompactionDecision{}, fmt.Errorf("memory manager is nil")
-	}
-	return scheduler.compactIfNeededAtTokens(ctx, manager, manager.TotalTokens())
-}
-
-func (scheduler *CompactionScheduler) compactIfNeededAtTokens(
+func (scheduler *CompactionScheduler) compactIfNeeded(
 	ctx context.Context,
 	manager *Manager,
 	beforeTokens int,

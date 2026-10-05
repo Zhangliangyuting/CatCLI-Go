@@ -17,10 +17,13 @@ import (
 type conversationMemoryRuntime struct {
 	conversationID  string
 	manager         *memory.Manager
+	contextBuilder  *memory.ContextBuilder
 	scheduler       *memory.CompactionScheduler
 	conversation    memory.ConversationStore
 	transcript      memory.TranscriptStore
 	generator       memory.CompactionGenerator
+	retriever       *memory.MemoryRetriever
+	retrievedTokens int
 	schedulerConfig memory.CompactionSchedulerConfig
 	taskSequence    atomic.Uint64
 	resumed         bool
@@ -28,11 +31,14 @@ type conversationMemoryRuntime struct {
 
 type taskMemoryRuntime struct {
 	conversationID string
+	manager        *memory.Manager
+	contextBuilder *memory.ContextBuilder
 	scheduler      *memory.CompactionScheduler
 }
 
 func newConversationMemoryRuntime(
 	client *llm.OpenAICompatibleClient,
+	retriever *memory.MemoryRetriever,
 	root string,
 	requestedConversationID string,
 	maxInputTokens int,
@@ -40,6 +46,9 @@ func newConversationMemoryRuntime(
 ) (*conversationMemoryRuntime, error) {
 	if client == nil {
 		return nil, fmt.Errorf("LLM client is nil")
+	}
+	if retriever == nil {
+		return nil, fmt.Errorf("memory retriever is nil")
 	}
 	if strings.TrimSpace(root) == "" {
 		return nil, fmt.Errorf("memory root is empty")
@@ -104,14 +113,19 @@ func newConversationMemoryRuntime(
 	if err != nil {
 		return nil, err
 	}
+	retrievedTokens := maxInputTokens / 5
+	contextBuilder := memory.NewContextBuilder(manager, retriever, retrievedTokens)
 
 	return &conversationMemoryRuntime{
 		conversationID:  conversationID,
 		manager:         manager,
+		contextBuilder:  contextBuilder,
 		scheduler:       scheduler,
 		conversation:    conversationStore,
 		transcript:      transcriptStore,
 		generator:       generator,
+		retriever:       retriever,
+		retrievedTokens: retrievedTokens,
 		schedulerConfig: memory.DefaultCompactionSchedulerConfig(maxInputTokens),
 		resumed:         resumed,
 	}, nil
@@ -153,8 +167,14 @@ func (runtime *conversationMemoryRuntime) newTaskMemoryRuntime(
 	if err != nil {
 		return nil, err
 	}
+	manager, err := newTaskMemoryManager(runtime.manager)
+	if err != nil {
+		return nil, err
+	}
 	return &taskMemoryRuntime{
 		conversationID: childConversationID,
+		manager:        manager,
+		contextBuilder: memory.NewContextBuilder(manager, runtime.retriever, runtime.retrievedTokens),
 		scheduler:      scheduler,
 	}, nil
 }
