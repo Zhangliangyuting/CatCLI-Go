@@ -85,34 +85,6 @@ func (t *Task) MarkBlocked(err error) {
 	t.endTime = time.Now()
 }
 
-func (t *Task) IsExecutable(allTasks map[string]*Task) bool {
-	if t.status != PENDING {
-		return false
-	}
-
-	for _, depID := range t.dependencies {
-
-		dep, ok := allTasks[depID]
-		if !ok || dep.status != COMPLETED {
-			return false
-		}
-	}
-
-	return true
-}
-
-func (t *Task) Execute() (string, error) {
-	t.MarkRunning()
-
-	// 模拟任务执行逻辑
-	// 这里可以根据任务类型执行不同的操作，例如调用工具、读取文件等
-	// 目前仅模拟成功执行
-	result := "Task executed successfully"
-	t.MarkCompleted(result)
-
-	return result, nil
-}
-
 func (t *Task) Dependencies() []string {
 	return t.dependencies
 }

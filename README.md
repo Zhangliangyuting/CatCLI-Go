@@ -117,6 +117,8 @@ The hybrid router first honors `/react` and `/plan`, then applies deterministic 
 
 ## Plan Execution
 
+[![Plan-and-Execute 架构图](docs/architecture/plan-execute%20agent.png)](docs/architecture/plan-execute%20agent.png)
+
 Plan mode uses `internal/plan` to ask the model for a structured JSON plan and computes a dependency-safe execution order. The CLI then displays the plan and lets you execute it, revise it with feedback, or cancel and return to the normal ReAct prompt. An approved plan runs each task through a fresh ReAct agent. Each task receives the overall goal, its description, declared resources, and the results from completed dependency tasks.
 
 If a task fails, the executor marks both the task and plan as `FAILED` and stops execution. Tasks that have not run remain `PENDING`.
