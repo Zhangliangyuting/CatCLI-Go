@@ -72,6 +72,22 @@ func (r *ToolRegistry) ToolDefinitions() []Definition {
 	return definitions
 }
 
+// Subset returns an independent registry containing only names that already
+// exist in this registry. Handlers are shared, while registration remains
+// isolated, making it suitable for role-specific least-privilege tool access.
+func (r *ToolRegistry) Subset(names ...string) *ToolRegistry {
+	subset := NewToolRegistry()
+	if r == nil {
+		return subset
+	}
+	for _, name := range names {
+		if registered, exists := r.tools[name]; exists {
+			subset.tools[name] = registered
+		}
+	}
+	return subset
+}
+
 func (r *ToolRegistry) RegisterProvider(provider Provider) {
 	for _, tool := range provider.Tools() {
 		r.RegisterTool(tool.Definition, tool.Handler)

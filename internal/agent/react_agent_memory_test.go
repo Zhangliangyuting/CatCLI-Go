@@ -239,14 +239,15 @@ func TestReActAgentCompactsBeforeEachLLMRequest(t *testing.T) {
 		WithCompactionScheduler(scheduler),
 	)
 	var events []Event
-	answer, err := agent.RunWithObserver(context.Background(), "hello", func(event Event) {
+	ctx := WithObserver(context.Background(), func(event Event) {
 		events = append(events, event)
 	})
+	answer, err := agent.Run(ctx, "hello")
 	if err != nil {
-		t.Fatalf("RunWithObserver() error = %v", err)
+		t.Fatalf("Run() error = %v", err)
 	}
 	if answer != "done" || requestCount != 1 {
-		t.Fatalf("RunWithObserver() = (%q, requests=%d), want (done, 1)", answer, requestCount)
+		t.Fatalf("Run() = (%q, requests=%d), want (done, 1)", answer, requestCount)
 	}
 	if scheduler.calls != 1 || !reflect.DeepEqual(scheduler.managerLens, []int{1}) {
 		t.Fatalf("scheduler calls = %d, manager lengths = %v", scheduler.calls, scheduler.managerLens)

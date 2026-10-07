@@ -1,6 +1,7 @@
-package agent
+package multiagent
 
 import (
+	baseagent "AgentCLI/internal/agent"
 	"AgentCLI/internal/plan"
 	"context"
 	"errors"
@@ -10,19 +11,13 @@ import (
 	"time"
 )
 
-type planScheduler struct {
-	maxWorkers      int
-	taskTimeout     time.Duration
-	executorFactory TaskAgentFactory
+type TaskScheduler struct {
+	maxWorkers  int
+	taskTimeout time.Duration
 }
 
-// TaskAgentFactory creates an isolated executor for one plan task. Receiving
-// the task ID lets callers assign separate memory and transcript namespaces.
-type TaskAgentFactory func(taskID string) (Agent, error)
-
 type taskJob struct {
-	id     string
-	prompt string
+	execution TaskExecution
 }
 
 type taskOutcome struct {
@@ -31,49 +26,25 @@ type taskOutcome struct {
 	err    error
 }
 
-func newPlanScheduler(
+func newTaskScheduler(
 	maxWorkers int,
 	taskTimeout time.Duration,
-	executorFactory func() Agent,
-) *planScheduler {
-	return newPlanSchedulerWithTaskFactory(
-		maxWorkers,
-		taskTimeout,
-		func(string) (Agent, error) {
-			return executorFactory(), nil
-		},
-	)
-}
-
-func newPlanSchedulerWithTaskFactory(
-	maxWorkers int,
-	taskTimeout time.Duration,
-	executorFactory TaskAgentFactory,
-) *planScheduler {
+) *TaskScheduler {
 	if maxWorkers < 1 {
 		maxWorkers = 1
 	}
 
-	return &planScheduler{
-		maxWorkers:      maxWorkers,
-		taskTimeout:     taskTimeout,
-		executorFactory: executorFactory,
+	return &TaskScheduler{
+		maxWorkers:  maxWorkers,
+		taskTimeout: taskTimeout,
 	}
 }
 
-func (s *planScheduler) Execute(
+func (s *TaskScheduler) Execute(
 	ctx context.Context,
 	p *plan.Plan,
+	executor *TaskExecutor,
 ) (string, error) {
-	return s.ExecuteWithObserver(ctx, p, nil)
-}
-
-func (s *planScheduler) ExecuteWithObserver(
-	ctx context.Context,
-	p *plan.Plan,
-	observer Observer,
-) (string, error) {
-	observer = SynchronizedObserver(observer)
 	executionCtx, cancelExecution := context.WithCancel(ctx)
 	defer cancelExecution()
 	ctxDone := executionCtx.Done()
@@ -124,7 +95,7 @@ func (s *planScheduler) ExecuteWithObserver(
 
 		go func() {
 			defer workers.Done()
-			s.runWorker(executionCtx, jobs, outcomes, observer)
+			s.runWorker(executionCtx, executor, jobs, outcomes)
 		}()
 	}
 
@@ -158,10 +129,10 @@ func (s *planScheduler) ExecuteWithObserver(
 			activeResources.acquire(task)
 			task.MarkRunning()
 
-			emit(observer, Event{
-				Type:    EventTaskStarted,
+			baseagent.Emit(ctx, baseagent.Event{
+				Type:    baseagent.EventTaskStarted,
 				TaskID:  task.ID(),
-				Title:   task.Name(),
+				Title:   "[WORKER] " + task.Name(),
 				Content: p.Visualize(),
 			})
 
@@ -170,8 +141,14 @@ func (s *planScheduler) ExecuteWithObserver(
 			prompt := buildTaskPrompt(p, task)
 
 			jobs <- taskJob{
-				id:     taskID,
-				prompt: prompt,
+				execution: TaskExecution{
+					TaskID:          taskID,
+					TaskName:        task.Name(),
+					TaskDescription: task.Description(),
+					TaskType:        task.Type(),
+					PlanGoal:        p.Goal(),
+					Prompt:          prompt,
+				},
 			}
 			running++
 		}
@@ -200,26 +177,26 @@ func (s *planScheduler) ExecuteWithObserver(
 			switch {
 			case errors.Is(outcome.err, context.Canceled):
 				task.MarkCancelled(outcome.err)
-				emit(observer, Event{
-					Type:    EventTaskCancelled,
+				baseagent.Emit(ctx, baseagent.Event{
+					Type:    baseagent.EventTaskCancelled,
 					TaskID:  outcome.id,
-					Title:   task.Name(),
+					Title:   "[WORKER] " + task.Name(),
 					Content: outcome.err.Error(),
 				})
 			case errors.Is(outcome.err, context.DeadlineExceeded):
 				task.MarkFailed(outcome.err)
-				emit(observer, Event{
-					Type:    EventTaskTimeout,
+				baseagent.Emit(ctx, baseagent.Event{
+					Type:    baseagent.EventTaskTimeout,
 					TaskID:  outcome.id,
-					Title:   task.Name(),
+					Title:   "[WORKER] " + task.Name(),
 					Content: outcome.err.Error(),
 				})
 			default:
 				task.MarkFailed(outcome.err)
-				emit(observer, Event{
-					Type:    EventTaskFailed,
+				baseagent.Emit(ctx, baseagent.Event{
+					Type:    baseagent.EventTaskFailed,
 					TaskID:  outcome.id,
-					Title:   task.Name(),
+					Title:   "[WORKER] " + task.Name(),
 					Content: outcome.err.Error(),
 				})
 			}
@@ -246,10 +223,10 @@ func (s *planScheduler) ExecuteWithObserver(
 		results[outcome.id] = outcome.result
 		completed++
 
-		emit(observer, Event{
-			Type:    EventTaskCompleted,
+		baseagent.Emit(ctx, baseagent.Event{
+			Type:    baseagent.EventTaskCompleted,
 			TaskID:  outcome.id,
-			Title:   task.Name(),
+			Title:   "[WORKER] " + task.Name(),
 			Content: p.Visualize(),
 		})
 
@@ -272,22 +249,22 @@ func (s *planScheduler) ExecuteWithObserver(
 		switch {
 		case errors.Is(executionErr, context.Canceled):
 			p.MarkCancelled()
-			emit(observer, Event{
-				Type:    EventPlanCancelled,
+			baseagent.Emit(ctx, baseagent.Event{
+				Type:    baseagent.EventPlanCancelled,
 				Title:   "计划执行已取消",
 				Content: executionErr.Error(),
 			})
 		case errors.Is(executionErr, context.DeadlineExceeded):
 			p.MarkFailed()
-			emit(observer, Event{
-				Type:    EventPlanTimeout,
+			baseagent.Emit(ctx, baseagent.Event{
+				Type:    baseagent.EventPlanTimeout,
 				Title:   "计划执行超时",
 				Content: executionErr.Error(),
 			})
 		default:
 			p.MarkFailed()
-			emit(observer, Event{
-				Type:    EventPlanFailed,
+			baseagent.Emit(ctx, baseagent.Event{
+				Type:    baseagent.EventPlanFailed,
 				Title:   "计划执行失败",
 				Content: executionErr.Error(),
 			})
@@ -302,8 +279,8 @@ func (s *planScheduler) ExecuteWithObserver(
 			completed,
 			len(taskIDs),
 		)
-		emit(observer, Event{
-			Type:    EventPlanFailed,
+		baseagent.Emit(ctx, baseagent.Event{
+			Type:    baseagent.EventPlanFailed,
 			Title:   "计划调度异常",
 			Content: err.Error(),
 		})
@@ -312,8 +289,8 @@ func (s *planScheduler) ExecuteWithObserver(
 
 	p.MarkCompleted()
 
-	emit(observer, Event{
-		Type:    EventPlanCompleted,
+	baseagent.Emit(ctx, baseagent.Event{
+		Type:    baseagent.EventPlanCompleted,
 		Title:   "计划执行完成",
 		Content: p.Visualize(),
 	})
@@ -321,11 +298,11 @@ func (s *planScheduler) ExecuteWithObserver(
 	return formatTaskResults(taskIDs, results), nil
 }
 
-func (s *planScheduler) runWorker(
+func (s *TaskScheduler) runWorker(
 	ctx context.Context,
+	executor *TaskExecutor,
 	jobs <-chan taskJob,
 	outcomes chan<- taskOutcome,
-	observer Observer,
 ) {
 	for job := range jobs {
 		taskCtx := ctx
@@ -336,36 +313,15 @@ func (s *planScheduler) runWorker(
 
 		var result string
 		var err error
-		// 每个任务创建独立 Agent，避免共享短期上下文。
-		var executor Agent
-		var factoryErr error
-		if s.executorFactory == nil {
-			factoryErr = fmt.Errorf("task agent factory is nil")
+		if executor == nil {
+			err = fmt.Errorf("task executor is nil")
 		} else {
-			executor, factoryErr = s.executorFactory(job.id)
-		}
-		if factoryErr != nil {
-			err = fmt.Errorf("create task agent: %w", factoryErr)
-		} else if executor == nil {
-			err = fmt.Errorf("create task agent: factory returned nil")
-		} else if observable, ok := executor.(ObservableAgent); ok {
-			result, err = observable.RunWithObserver(
-				taskCtx,
-				job.prompt,
-				func(event Event) {
-					if event.TaskID == "" {
-						event.TaskID = job.id
-					}
-					emit(observer, event)
-				},
-			)
-		} else {
-			result, err = executor.Run(taskCtx, job.prompt)
+			result, err = executor.Execute(taskCtx, job.execution)
 		}
 		cancel()
 
 		outcomes <- taskOutcome{
-			id:     job.id,
+			id:     job.execution.TaskID,
 			result: result,
 			err:    err,
 		}

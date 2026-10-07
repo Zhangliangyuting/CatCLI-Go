@@ -17,11 +17,12 @@ type consoleObserver struct {
 
 func newConsoleObserver(output io.Writer, debug bool) agent.Observer {
 	observer := &consoleObserver{output: output, debug: debug}
-	return agent.SynchronizedObserver(observer.observe)
+	return observer.observe
 }
 
 func (observer *consoleObserver) observe(event agent.Event) {
 	prefix := "[agent]"
+	planPrefix := "[plan]"
 	if event.TaskID != "" {
 		prefix = "[" + event.TaskID + "]"
 	}
@@ -72,6 +73,8 @@ func (observer *consoleObserver) observe(event agent.Event) {
 		} else {
 			fmt.Fprintf(observer.output, "%s 📦 tool result %s\n", prefix, event.Title)
 		}
+	case agent.EventResultReview:
+		fmt.Fprintf(observer.output, "%s 🧐 结果检查%s：%s\n", prefix, event.Title, event.Content)
 	case agent.EventTaskStarted:
 		fmt.Fprintf(observer.output, "\n%s ▶️ 开始执行：%s\n%s\n", prefix, event.Title, event.Content)
 	case agent.EventTaskCompleted:
@@ -83,18 +86,18 @@ func (observer *consoleObserver) observe(event agent.Event) {
 	case agent.EventTaskTimeout:
 		fmt.Fprintf(observer.output, "\n%s ⏱️ 任务执行超时：%s\n%s\n", prefix, event.Title, event.Content)
 	case agent.EventPlanGenerated:
-		fmt.Fprintf(observer.output, "\n[plan] 🗺️ %s\n", event.Title)
+		fmt.Fprintf(observer.output, "\n%s 🗺️ %s\n", planPrefix, event.Title)
 	case agent.EventPlanRevised:
-		fmt.Fprintf(observer.output, "\n[plan] ✏️ %s\n", event.Title)
+		fmt.Fprintf(observer.output, "\n%s ✏️ %s\n", planPrefix, event.Title)
 	case agent.EventPlanCancelled:
-		fmt.Fprintf(observer.output, "\n[plan] ⏹️ %s\n", event.Title)
+		fmt.Fprintf(observer.output, "\n%s ⏹️ %s\n", planPrefix, event.Title)
 	case agent.EventPlanReplanning:
-		fmt.Fprintf(observer.output, "\n[plan] 🔄 %s\n%s\n", event.Title, event.Content)
+		fmt.Fprintf(observer.output, "\n%s 🔄 %s\n%s\n", planPrefix, event.Title, event.Content)
 	case agent.EventPlanCompleted:
-		fmt.Fprintf(observer.output, "\n[plan] ✅ %s\n%s\n", event.Title, event.Content)
+		fmt.Fprintf(observer.output, "\n%s ✅ %s\n%s\n", planPrefix, event.Title, event.Content)
 	case agent.EventPlanFailed:
-		fmt.Fprintf(observer.output, "\n[plan] ❌ %s\n%s\n", event.Title, event.Content)
+		fmt.Fprintf(observer.output, "\n%s ❌ %s\n%s\n", planPrefix, event.Title, event.Content)
 	case agent.EventPlanTimeout:
-		fmt.Fprintf(observer.output, "\n[plan] ⏱️ %s\n%s\n", event.Title, event.Content)
+		fmt.Fprintf(observer.output, "\n%s ⏱️ %s\n%s\n", planPrefix, event.Title, event.Content)
 	}
 }

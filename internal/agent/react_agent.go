@@ -7,6 +7,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 )
 
 type ReActAgent struct {
@@ -15,25 +16,14 @@ type ReActAgent struct {
 	memoryManager       *memory.Manager
 	contextBuilder      *memory.ContextBuilder
 	currentQuery        string
-	compactionScheduler ContextCompactionScheduler
+	compactionScheduler memory.ContextCompactionScheduler
 	requestEstimator    memory.RequestTokenEstimator
 	transcript          memory.TranscriptStore
 	conversationID      string
 	systemMessage       llm.Message
 }
 
-var _ ObservableAgent = (*ReActAgent)(nil)
-
-// ContextCompactionScheduler is the part of memory.CompactionScheduler used by
-// ReActAgent. Keeping the dependency as an interface makes scheduling behavior
-// deterministic in agent tests.
-type ContextCompactionScheduler interface {
-	CompactToFit(
-		ctx context.Context,
-		manager *memory.Manager,
-		measure memory.ContextTokenMeasurer,
-	) ([]memory.CompactionDecision, error)
-}
+var _ Agent = (*ReActAgent)(nil)
 
 type ReActAgentOption func(*ReActAgent)
 
@@ -56,7 +46,7 @@ func WithContextBuilder(builder *memory.ContextBuilder) ReActAgentOption {
 	}
 }
 
-func WithCompactionScheduler(scheduler ContextCompactionScheduler) ReActAgentOption {
+func WithCompactionScheduler(scheduler memory.ContextCompactionScheduler) ReActAgentOption {
 	return func(agent *ReActAgent) {
 		agent.compactionScheduler = scheduler
 	}
@@ -66,6 +56,14 @@ func WithRequestTokenEstimator(estimator memory.RequestTokenEstimator) ReActAgen
 	return func(agent *ReActAgent) {
 		if estimator != nil {
 			agent.requestEstimator = estimator
+		}
+	}
+}
+
+func WithSystemPrompt(prompt string) ReActAgentOption {
+	return func(agent *ReActAgent) {
+		if prompt = strings.TrimSpace(prompt); prompt != "" {
+			agent.systemMessage = llm.SystemMessage(prompt)
 		}
 	}
 }
@@ -109,14 +107,6 @@ func (a *ReActAgent) Run(
 	ctx context.Context,
 	userInput string,
 ) (string, error) {
-	return a.RunWithObserver(ctx, userInput, nil)
-}
-
-func (a *ReActAgent) RunWithObserver(
-	ctx context.Context,
-	userInput string,
-	observer Observer,
-) (string, error) {
 	a.currentQuery = userInput
 	if _, err := a.storeMessage(llm.UserMessage(userInput), ""); err != nil {
 		return "", fmt.Errorf("store user message: %w", err)
@@ -128,11 +118,11 @@ func (a *ReActAgent) RunWithObserver(
 		if err := ctx.Err(); err != nil {
 			return "", err
 		}
-		if err := a.compactContextIfNeeded(ctx, tools, observer); err != nil {
+		if err := a.compactContextIfNeeded(ctx, tools); err != nil {
 			return "", err
 		}
 
-		messages, err := a.contextMessagesForObserved(ctx, observer)
+		messages, err := a.contextMessagesFor(ctx)
 		if err != nil {
 			return "", err
 		}
@@ -155,7 +145,7 @@ func (a *ReActAgent) RunWithObserver(
 			return "", fmt.Errorf("store assistant message: %w", err)
 		}
 
-		emit(observer, Event{
+		Emit(ctx, Event{
 			Type:  EventTokenUsage,
 			Title: "Token usage",
 			Content: fmt.Sprintf(
@@ -172,7 +162,7 @@ func (a *ReActAgent) RunWithObserver(
 		}
 
 		for _, toolCall := range result.Message.ToolCalls {
-			emit(observer, Event{
+			Emit(ctx, Event{
 				Type:    EventToolCall,
 				Title:   toolCall.Function.Name,
 				Content: toolCall.Function.Arguments,
@@ -181,7 +171,7 @@ func (a *ReActAgent) RunWithObserver(
 			var args map[string]interface{}
 			if err := json.Unmarshal([]byte(toolCall.Function.Arguments), &args); err != nil {
 				toolResult := "ERROR: invalid tool arguments: " + err.Error()
-				emit(observer, Event{
+				Emit(ctx, Event{
 					Type:    EventToolResult,
 					Title:   toolCall.Function.Name,
 					Content: toolResult,
@@ -204,7 +194,7 @@ func (a *ReActAgent) RunWithObserver(
 				toolResult = "ERROR: " + err.Error()
 			}
 
-			emit(observer, Event{
+			Emit(ctx, Event{
 				Type:    EventToolResult,
 				Title:   toolCall.Function.Name,
 				Content: toolResult,
@@ -236,7 +226,6 @@ func (a *ReActAgent) storeMessage(message llm.Message, toolName string) (memory.
 func (a *ReActAgent) compactContextIfNeeded(
 	ctx context.Context,
 	tools []tool.Definition,
-	observer Observer,
 ) error {
 	if a.compactionScheduler == nil {
 		return nil
@@ -249,7 +238,7 @@ func (a *ReActAgent) compactContextIfNeeded(
 		return a.requestEstimator.Estimate(messages, tools)
 	}
 	decisions, err := a.compactionScheduler.CompactToFit(ctx, a.memoryManager, measure)
-	emitCompactionDecisions(observer, decisions)
+	EmitCompactionDecisions(ctx, decisions)
 	if err != nil {
 		return fmt.Errorf("compact conversation context: %w", err)
 	}
@@ -265,15 +254,11 @@ func (a *ReActAgent) contextMessages() ([]llm.Message, error) {
 }
 
 func (a *ReActAgent) contextMessagesFor(ctx context.Context) ([]llm.Message, error) {
-	return a.contextMessagesForObserved(ctx, nil)
-}
-
-func (a *ReActAgent) contextMessagesForObserved(ctx context.Context, observer Observer) ([]llm.Message, error) {
 	if a.contextBuilder == nil {
 		return nil, fmt.Errorf("context builder is nil")
 	}
 	messages, err := a.contextBuilder.BuildWithReport(ctx, a.currentQuery, func(report memory.RetrievalReport) {
-		emit(observer, Event{Type: EventMemoryRetrieval, Retrieval: &report})
+		Emit(ctx, Event{Type: EventMemoryRetrieval, Retrieval: &report})
 	})
 	if err != nil {
 		return nil, fmt.Errorf("build conversation context: %w", err)

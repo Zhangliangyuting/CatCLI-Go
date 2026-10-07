@@ -10,15 +10,15 @@ import (
 // request. It can wrap both ReAct and Plan agents without teaching either one
 // about persistence or fact extraction prompts.
 type FactAwareAgent struct {
-	delegate  ObservableAgent
+	delegate  Agent
 	manager   *memory.Manager
 	extractor memory.FactExtractor
 }
 
-var _ ObservableAgent = (*FactAwareAgent)(nil)
+var _ Agent = (*FactAwareAgent)(nil)
 
 func NewFactAwareAgent(
-	delegate ObservableAgent,
+	delegate Agent,
 	manager *memory.Manager,
 	extractor memory.FactExtractor,
 ) (*FactAwareAgent, error) {
@@ -35,14 +35,6 @@ func NewFactAwareAgent(
 }
 
 func (agent *FactAwareAgent) Run(ctx context.Context, userInput string) (string, error) {
-	return agent.RunWithObserver(ctx, userInput, nil)
-}
-
-func (agent *FactAwareAgent) RunWithObserver(
-	ctx context.Context,
-	userInput string,
-	observer Observer,
-) (string, error) {
 	operations, err := agent.extractor.Extract(ctx, userInput, agent.manager.Facts())
 	if err != nil {
 		return "", fmt.Errorf("extract facts: %w", err)
@@ -51,11 +43,11 @@ func (agent *FactAwareAgent) RunWithObserver(
 		return "", fmt.Errorf("apply facts: %w", err)
 	}
 	for _, operation := range operations {
-		emit(observer, Event{
+		Emit(ctx, Event{
 			Type:    EventMemoryFact,
 			Title:   string(operation.Action),
 			Content: fmt.Sprintf("scope=%s key=%s", operation.Scope, operation.Key),
 		})
 	}
-	return agent.delegate.RunWithObserver(ctx, userInput, observer)
+	return agent.delegate.Run(ctx, userInput)
 }

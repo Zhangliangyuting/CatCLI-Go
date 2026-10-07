@@ -38,3 +38,18 @@ func TestExecuteCommandUsesParentContext(t *testing.T) {
 		t.Fatalf("ExecuteCommandHandler() error = %v, want context.Canceled", err)
 	}
 }
+
+func TestToolRegistrySubsetRestrictsTools(t *testing.T) {
+	registry := NewToolRegistry()
+	registry.RegisterTool(ReadFileDefinition(), ReadFileHandler)
+	registry.RegisterTool(WriteFileDefinition(), WriteFileHandler)
+
+	readOnly := registry.Subset("read_file", "list_dir")
+	definitions := readOnly.ToolDefinitions()
+	if len(definitions) != 1 || definitions[0].FunctionDefinition.Name != "read_file" {
+		t.Fatalf("read-only definitions = %#v", definitions)
+	}
+	if _, err := readOnly.Execute(context.Background(), "write_file", nil); err == nil {
+		t.Fatal("write_file remained available in read-only subset")
+	}
+}

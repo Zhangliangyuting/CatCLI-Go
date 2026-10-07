@@ -1,4 +1,4 @@
-package agent
+package multiagent
 
 import (
 	"AgentCLI/internal/plan"

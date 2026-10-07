@@ -30,22 +30,6 @@ func NewPlan(id string, goal string, summary string) *Plan {
 	}
 }
 
-type rawPlan struct {
-	Goal    string    `json:"goal"`
-	Summary string    `json:"summary"`
-	Tasks   []rawTask `json:"tasks"`
-}
-
-type rawTask struct {
-	ID             string   `json:"id"`
-	Name           string   `json:"name"`
-	Description    string   `json:"description"`
-	Type           TaskType `json:"type"`
-	Dependencies   []string `json:"dependencies"`
-	ReadResources  []string `json:"read_resources"`
-	WriteResources []string `json:"write_resources"`
-}
-
 type PlanStatus string
 
 const (

@@ -10,6 +10,7 @@ This project is intentionally minimal. It is a first step from zero to a working
 - ReAct agent loop with tool calling
 - Automatic routing between ReAct and Plan-and-Execute modes
 - Plan generation with dependency-aware parallel execution
+- Planner, Worker, and Reviewer SubAgents with isolated role prompts
 - Task- and plan-level timeout and cancellation propagation
 - Structured execution events for CLI output and observers
 - Concurrent in-memory storage with typed entries and token-budget selection
@@ -176,7 +177,7 @@ Parse JSON into Plan and Tasks
 TopologicalSort (dependency-safe order)
         |
         v
-PlanReviewer
+PlanDecisionPrompt
         |
         +--> execute the current plan
         +--> revise with feedback --> review the replacement plan
@@ -226,7 +227,9 @@ Supported task types are `PLANNING`, `FILE_READ`, `FILE_WRITE`, `COMMAND`, `ANAL
 
 Before execution, task dependencies are validated and sorted with Kahn's topological-sort algorithm. Unknown dependencies, self-dependencies, duplicate task IDs, invalid task types, and dependency cycles cause plan generation to fail before any task runs.
 
-Each task uses a new ReAct agent so that conversation history from one task does not accidentally leak into another. Required context is passed explicitly through the task prompt:
+Plan execution is coordinated by `PlanAndExecuteAgent` using three `SubAgent` roles: Planner produces the structured plan, each task receives a fresh Worker with isolated task memory, and Reviewer independently checks every successful task result before the scheduler marks it complete. Reviewer receives a restricted registry containing only enabled `list_dir` and `read_file` tools; it cannot edit files or execute commands. Required context is passed explicitly through the task prompt:
+
+[![Multi-Agent 架构图](docs/architecture/multi-agent.png)](docs/architecture/multi-agent.png)
 
 - the overall plan goal;
 - the current task description;
@@ -236,15 +239,21 @@ Each task uses a new ReAct agent so that conversation history from one task does
 
 The main implementation files are:
 
-- `internal/plan/plan_generator.go`: requests and parses the structured plan;
 - `internal/plan/plan.go`: stores the plan and computes dependency order;
 - `internal/plan/task.go`: stores task state, dependencies, results, and errors;
-- `internal/agent/plan_execute_agent.go`: coordinates plan review, revision, cancellation, and execution;
-- `internal/agent/plan_scheduler.go`: owns the worker pool, dynamic DAG scheduling, task timeouts, and fail-fast behavior;
-- `internal/agent/resource_tracker.go`: prevents tasks with conflicting declared resources from running together;
-- `cmd/catcli/main.go`: assembles the router, agents, observer, tools, cancellation, and CLI reviewer.
+- `internal/agent/multiagent/plan_execute_agent.go`: coordinates planning, user decisions, task execution, result checks, and replanning;
+- `internal/agent/multiagent/planner_sub_agent.go`: requests and parses structured plans;
+- `internal/agent/multiagent/worker_sub_agent.go`: executes one task with isolated memory and enabled tools;
+- `internal/agent/multiagent/reviewer_sub_agent.go`: independently verifies Worker results with read-only tools;
+- `internal/agent/multiagent/sub_agent.go`: provides the shared LLM and tool execution core used by specialized SubAgents;
+- `internal/agent/multiagent/task_executor.go`: creates isolated Workers, executes them, and invokes the Reviewer;
+- `internal/agent/multiagent/task_scheduler.go`: owns only the worker pool, dynamic DAG scheduling, task timeouts, and fail-fast behavior;
+- `internal/agent/multiagent/resource_tracker.go`: prevents tasks with conflicting declared resources from running together;
+- `cmd/catcli/main.go`: assembles the router, agents, observer, tools, cancellation, and CLI plan decision provider.
 
 Plan execution uses a bounded worker pool. Dependency-ready tasks run concurrently up to `agent.max_workers`, and completing a task immediately makes newly unblocked dependents eligible to run. The scheduler also considers declared resources: read/read access may overlap, while read/write and write/write access to the same normalized path are serialized. After a task failure, the scheduler stops dispatching new work, cancels running siblings, waits for dispatched tasks, and may generate a replacement plan up to `agent.max_replan_attempts` times.
+
+Agent events are delivered through the request `context.Context`; task contexts automatically add their `TaskID`, while role-specific event titles identify Planner, Worker, and Reviewer activity. The end-to-end integration test in `internal/agent/multiagent/multi_agent_integration_test.go` verifies planning, Worker tool use, independent read-only Reviewer verification, approval, and structured events.
 
 ## Architecture and Helper Modules
 
@@ -256,7 +265,7 @@ Entry helpers
              |
              v
 Agent execution
-    ReActAgent / PlanAndExecuteAgent
+    ReActAgent / PlanAndExecuteAgent / SubAgent
              |
              v
 Execution infrastructure
@@ -268,16 +277,17 @@ The main helper modules are:
 | Module | Responsibility | Engineering safeguard |
 | --- | --- | --- |
 | `internal/routing/mode_router.go` | Selects ReAct or Plan mode using explicit commands, rules, and an LLM classifier | Invalid classifier output falls back to ReAct |
-| `internal/agent/event.go` | Defines structured Agent, Task, Plan, Tool, and token events | `SynchronizedObserver` serializes events from concurrent workers |
-| `internal/agent/plan_scheduler.go` | Runs the bounded worker pool and dynamically releases dependency-ready tasks | Enforces worker limits, task timeouts, cancellation, fail-fast, and worker shutdown |
-| `internal/agent/resource_tracker.go` | Tracks resources held by running tasks | Allows read/read concurrency and blocks read/write or write/write conflicts |
+| `internal/agent/event.go` | Defines structured Agent, Task, Plan, Tool, and token events | Request-scoped observers are stored in `context.Context` and serialized for concurrent workers |
+| `internal/agent/multiagent/task_executor.go` | Creates an isolated Agent and executes one scheduled task | Keeps Agent construction and result checking outside the scheduler |
+| `internal/agent/multiagent/task_scheduler.go` | Runs the bounded worker pool and dynamically releases dependency-ready tasks | Enforces worker limits, task timeouts, cancellation, fail-fast, and worker shutdown |
+| `internal/agent/multiagent/resource_tracker.go` | Tracks resources held by running tasks | Allows read/read concurrency and blocks read/write or write/write conflicts |
 | `internal/memory/manager.go` | Stores typed memory entries and selects recent context within a token budget | Uses immutable entry values, defensive metadata copies, unique IDs, and synchronization |
 | `internal/tool/tool_registry.go` | Registers enabled tools and dispatches LLM tool calls | Rejects unknown tools and propagates `context.Context` into handlers |
 | `internal/tool/file_lock.go` | Maintains one `sync.RWMutex` per normalized file path | Serializes actual file writes without blocking unrelated files |
 | `internal/plan/visualizer.go` | Renders plan status, progress, dependencies, and resources | Makes the generated plan inspectable before and during execution |
-| `internal/cli/plan_reviewer.go` | Provides a reusable terminal implementation of `PlanReviewer` | Requires an explicit execute, revise, or cancel decision |
+| `internal/cli/plan_decision_provider.go` | Prompts the user to execute, revise, or cancel a generated plan | Requires an explicit decision before execution |
 
-These safeguards operate at different boundaries. The scheduler resource tracker prevents known conflicting tasks from starting together. File locks protect actual file-tool operations if a declaration is incomplete. Each plan task receives a fresh ReAct agent so concurrent tasks never share conversation history.
+These safeguards operate at different boundaries. The scheduler resource tracker prevents known conflicting tasks from starting together. File locks protect actual file-tool operations if a declaration is incomplete. Each plan task receives a fresh Worker and task runtime so concurrent tasks never share conversation history.
 
 ### Lifecycle and Cancellation
 
@@ -381,8 +391,8 @@ If you want to study how the agent is built, a good progression is:
 3. Inspect how messages and tool calls are represented in `internal/llm/message.go`.
 4. Review tool registration and dispatch in `internal/tool/tool_registry.go`.
 5. Follow event delivery in `internal/agent/event.go`.
-6. Read the planner and executor flow in `internal/plan` and `internal/agent/plan_execute_agent.go`.
-7. Study dynamic scheduling in `internal/agent/plan_scheduler.go`.
+6. Read the planner and executor flow in `internal/plan` and `internal/agent/multiagent/plan_execute_agent.go`.
+7. Study dynamic scheduling in `internal/agent/multiagent/task_scheduler.go`.
 8. Compare task-level resource tracking with tool-level file locking.
 9. Follow hybrid mode selection in `internal/routing/mode_router.go`.
 10. Add one new tool and wire it into the registry.
@@ -395,12 +405,12 @@ This keeps the codebase small enough to understand while still showing the full 
 ```text
 cmd/catcli/                 CLI entrypoint
 config/                     Runtime and example YAML config
-internal/agent/             Agent interface, ReAct loop, and plan executor
+internal/agent/             Agent interface, ReAct loop, events, and Multi-Agent execution
 internal/cli/               Reusable CLI-specific implementations
 internal/config/            Viper-based config loading
 internal/llm/               OpenAI-compatible chat client
 internal/memory/            Typed memory entries, token counting, and in-memory management
-internal/plan/              Plan generation, task state, dependency ordering, visualization
+internal/plan/              Plan and task state, dependency ordering, visualization
 internal/routing/           Hybrid ReAct/Plan mode selection
 internal/tool/              Tool definitions, handlers, providers, registry
 ```

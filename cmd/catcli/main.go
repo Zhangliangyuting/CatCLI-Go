@@ -2,11 +2,11 @@ package main
 
 import (
 	"AgentCLI/internal/agent"
+	"AgentCLI/internal/agent/multiagent"
 	"AgentCLI/internal/cli"
 	"AgentCLI/internal/config"
 	"AgentCLI/internal/llm"
 	"AgentCLI/internal/memory"
-	"AgentCLI/internal/plan"
 	"AgentCLI/internal/routing"
 	"AgentCLI/internal/tool"
 	"bufio"
@@ -81,7 +81,7 @@ func main() {
 	}
 	retriever := memory.NewMemoryRetriever(embedder)
 	// 创建或恢复当前对话的短期记忆，并接入共享检索器和自动压缩。
-	memoryRuntime, err := newConversationMemoryRuntime(
+	memoryRuntime, err := memory.NewConversationRuntime(
 		client,
 		retriever,
 		".catcli",
@@ -93,15 +93,15 @@ func main() {
 		fmt.Println("memory runtime error:", err)
 		return
 	}
-	requestEstimator := memory.NewCalibratedRequestTokenEstimator(nil)
+	rootMemory := memoryRuntime.RootContext()
 	agentInstance := agent.NewReActAgent(
 		client,
 		toolRegistry,
-		agent.WithMemoryManager(memoryRuntime.manager),
-		agent.WithContextBuilder(memoryRuntime.contextBuilder),
-		agent.WithCompactionScheduler(memoryRuntime.scheduler),
-		agent.WithRequestTokenEstimator(requestEstimator),
-		agent.WithTranscript(memoryRuntime.transcript, memoryRuntime.conversationID),
+		agent.WithMemoryManager(rootMemory.Manager),
+		agent.WithContextBuilder(rootMemory.ContextBuilder),
+		agent.WithCompactionScheduler(rootMemory.Scheduler),
+		agent.WithRequestTokenEstimator(rootMemory.Estimator),
+		agent.WithTranscript(rootMemory.Transcript, rootMemory.ConversationID),
 	)
 	factExtractor, err := memory.NewLLMFactExtractor(client)
 	if err != nil {
@@ -110,7 +110,7 @@ func main() {
 	}
 	factAwareReactAgent, err := agent.NewFactAwareAgent(
 		agentInstance,
-		memoryRuntime.manager,
+		rootMemory.Manager,
 		factExtractor,
 	)
 	if err != nil {
@@ -120,45 +120,41 @@ func main() {
 	eventObserver := newConsoleObserver(os.Stdout, cfg.Debug)
 	reader := bufio.NewReader(os.Stdin)
 
-	planner := plan.NewLLMPlanGenerator(client)
+	plannerSubAgent, err := multiagent.NewPlannerSubAgent(
+		client,
+	)
+	if err != nil {
+		fmt.Println("planner SubAgent error:", err)
+		return
+	}
+	reviewerSubAgent, err := multiagent.NewReviewerSubAgent(
+		client,
+		toolRegistry.Subset("list_dir", "read_file"),
+	)
+	if err != nil {
+		fmt.Println("reviewer SubAgent error:", err)
+		return
+	}
 	modeRouter := routing.NewHybridModeRouter(client)
-	planAgent := agent.NewPlanAndExecuteAgentWithTaskFactory(
-		planner,
-		func(taskID string) (agent.Agent, error) {
-			taskRuntime, err := memoryRuntime.newTaskMemoryRuntime(taskID)
-			if err != nil {
-				return nil, err
-			}
-			return agent.NewReActAgent(
-				client,
-				toolRegistry,
-				agent.WithMemoryManager(taskRuntime.manager),
-				agent.WithContextBuilder(taskRuntime.contextBuilder),
-				agent.WithCompactionScheduler(taskRuntime.scheduler),
-				agent.WithRequestTokenEstimator(requestEstimator),
-				agent.WithTranscript(memoryRuntime.transcript, taskRuntime.conversationID),
-			), nil
-		},
-		cli.NewPlanReviewer(reader),
+	planAgent, err := multiagent.NewPlanAndExecuteAgent(
+		plannerSubAgent,
+		client,
+		toolRegistry,
+		reviewerSubAgent,
+		memoryRuntime,
+		cli.NewCLIPlanDecisionProvider(reader),
 		cfg.Agent.MaxReplanAttempts,
 		cfg.Agent.MaxWorkers,
 		cfg.Agent.TaskTimeout,
 		cfg.Agent.PlanTimeout,
 	)
-	if err := planAgent.ConfigureMemory(
-		memoryRuntime.manager,
-		memoryRuntime.contextBuilder,
-		memoryRuntime.scheduler,
-		requestEstimator,
-		memoryRuntime.transcript,
-		memoryRuntime.conversationID,
-	); err != nil {
-		fmt.Println("configure plan memory error:", err)
+	if err != nil {
+		fmt.Println("plan-and-execute SubAgent error:", err)
 		return
 	}
 	factAwarePlanAgent, err := agent.NewFactAwareAgent(
 		planAgent,
-		memoryRuntime.manager,
+		rootMemory.Manager,
 		factExtractor,
 	)
 	if err != nil {
@@ -167,11 +163,11 @@ func main() {
 	}
 
 	//用户输入循环
-	if memoryRuntime.resumed {
-		fmt.Printf("Resumed conversation: %s\n", memoryRuntime.conversationID)
+	if memoryRuntime.Resumed() {
+		fmt.Printf("Resumed conversation: %s\n", rootMemory.ConversationID)
 	} else {
-		fmt.Printf("New conversation: %s\n", memoryRuntime.conversationID)
-		fmt.Printf("Resume with CATCLI_CONVERSATION_ID=%s\n", memoryRuntime.conversationID)
+		fmt.Printf("New conversation: %s\n", rootMemory.ConversationID)
+		fmt.Printf("Resume with CATCLI_CONVERSATION_ID=%s\n", rootMemory.ConversationID)
 	}
 	fmt.Println("AgentCLI started. Type exit to quit.")
 
@@ -196,7 +192,7 @@ func main() {
 
 		if input == "clear" {
 			agentInstance.ClearHistory()
-			if err := memoryRuntime.save(); err != nil {
+			if err := memoryRuntime.Save(); err != nil {
 				fmt.Println("save conversation error:", err)
 				continue
 			}
@@ -207,16 +203,15 @@ func main() {
 		answer, err := runWithInterrupt(
 			func(ctx context.Context) (string, error) {
 				return runRoutedInput(
-					ctx,
+					agent.WithObserver(ctx, eventObserver),
 					modeRouter,
 					factAwareReactAgent,
 					factAwarePlanAgent,
 					input,
-					eventObserver,
 				)
 			},
 		)
-		saveErr := memoryRuntime.save()
+		saveErr := memoryRuntime.Save()
 		if err != nil {
 			printRunError("agent error", err)
 			if saveErr != nil {
@@ -237,10 +232,9 @@ func main() {
 func runRoutedInput(
 	ctx context.Context,
 	router routing.ModeRouter,
-	reactAgent agent.ObservableAgent,
-	planAgent agent.ObservableAgent,
+	reactAgent agent.Agent,
+	planAgent agent.Agent,
 	input string,
-	observer agent.Observer,
 ) (string, error) {
 	decision, err := router.Route(ctx, input)
 	if err != nil {
@@ -257,17 +251,9 @@ func runRoutedInput(
 
 	switch decision.Mode {
 	case routing.ModeReact:
-		return reactAgent.RunWithObserver(
-			ctx,
-			decision.Input,
-			observer,
-		)
+		return reactAgent.Run(ctx, decision.Input)
 	case routing.ModePlan:
-		return planAgent.RunWithObserver(
-			ctx,
-			decision.Input,
-			observer,
-		)
+		return planAgent.Run(ctx, decision.Input)
 	default:
 		return "", fmt.Errorf(
 			"unsupported execution mode %q",

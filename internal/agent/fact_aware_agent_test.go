@@ -7,15 +7,11 @@ import (
 	"testing"
 )
 
-type stubObservableAgent struct {
+type stubAgent struct {
 	calls int
 }
 
-func (agent *stubObservableAgent) Run(ctx context.Context, input string) (string, error) {
-	return agent.RunWithObserver(ctx, input, nil)
-}
-
-func (agent *stubObservableAgent) RunWithObserver(context.Context, string, Observer) (string, error) {
+func (agent *stubAgent) Run(context.Context, string) (string, error) {
 	agent.calls++
 	return "done", nil
 }
@@ -35,7 +31,7 @@ func (extractor stubFactExtractor) Extract(
 
 func TestFactAwareAgentAppliesFactsBeforeDelegating(t *testing.T) {
 	manager := memory.NewManager(nil)
-	delegate := &stubObservableAgent{}
+	delegate := &stubAgent{}
 	agent, err := NewFactAwareAgent(delegate, manager, stubFactExtractor{operations: []memory.FactOperation{{
 		Action: memory.FactActionUpsert, Scope: memory.FactScopeUser,
 		Key: "programming_language", Content: "Prefer Go.",
@@ -44,11 +40,12 @@ func TestFactAwareAgentAppliesFactsBeforeDelegating(t *testing.T) {
 		t.Fatalf("NewFactAwareAgent() error = %v", err)
 	}
 	var events []Event
-	answer, err := agent.RunWithObserver(context.Background(), "以后用 Go", func(event Event) {
+	ctx := WithObserver(context.Background(), func(event Event) {
 		events = append(events, event)
 	})
+	answer, err := agent.Run(ctx, "以后用 Go")
 	if err != nil {
-		t.Fatalf("RunWithObserver() error = %v", err)
+		t.Fatalf("Run() error = %v", err)
 	}
 	if answer != "done" || delegate.calls != 1 {
 		t.Fatalf("result = (%q, calls=%d), want (done, 1)", answer, delegate.calls)
@@ -64,7 +61,7 @@ func TestFactAwareAgentAppliesFactsBeforeDelegating(t *testing.T) {
 
 func TestFactAwareAgentDoesNotDelegateWhenExtractionFails(t *testing.T) {
 	manager := memory.NewManager(nil)
-	delegate := &stubObservableAgent{}
+	delegate := &stubAgent{}
 	extractionError := errors.New("unavailable")
 	agent, err := NewFactAwareAgent(delegate, manager, stubFactExtractor{err: extractionError})
 	if err != nil {

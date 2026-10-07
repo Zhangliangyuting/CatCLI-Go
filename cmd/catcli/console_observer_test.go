@@ -79,6 +79,18 @@ func TestConsoleObserverDebugModeShowsEventDetails(t *testing.T) {
 	}
 }
 
+func TestConsoleObserverShowsRoleWrittenByEmitter(t *testing.T) {
+	var output bytes.Buffer
+	newConsoleObserver(&output, false)(agent.Event{
+		Type:   agent.EventTaskStarted,
+		TaskID: "task_1",
+		Title:  "[WORKER] 执行",
+	})
+	if !strings.Contains(output.String(), "[WORKER]") {
+		t.Fatalf("role-aware output = %q", output.String())
+	}
+}
+
 func TestConsoleObserverPrefixesEveryVisibleEventTypeWithEmoji(t *testing.T) {
 	tests := []struct {
 		event agent.Event
@@ -90,6 +102,7 @@ func TestConsoleObserverPrefixesEveryVisibleEventTypeWithEmoji(t *testing.T) {
 		{event: agent.Event{Type: agent.EventMemoryRetrieval, Retrieval: &memory.RetrievalReport{}}, emoji: "🔎"},
 		{event: agent.Event{Type: agent.EventToolCall, Title: "read_file"}, emoji: "🔧"},
 		{event: agent.Event{Type: agent.EventToolResult, Title: "read_file"}, emoji: "📦"},
+		{event: agent.Event{Type: agent.EventResultReview, Title: "通过"}, emoji: "🧐"},
 		{event: agent.Event{Type: agent.EventTaskStarted, Title: "task"}, emoji: "▶️"},
 		{event: agent.Event{Type: agent.EventTaskCompleted, Title: "task"}, emoji: "✅"},
 		{event: agent.Event{Type: agent.EventTaskFailed, Title: "task"}, emoji: "❌"},

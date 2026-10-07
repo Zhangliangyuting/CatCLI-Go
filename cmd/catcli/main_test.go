@@ -1,7 +1,6 @@
 package main
 
 import (
-	"AgentCLI/internal/agent"
 	"AgentCLI/internal/routing"
 	"context"
 	"testing"
@@ -24,16 +23,8 @@ type recordingAgent struct {
 }
 
 func (a *recordingAgent) Run(
-	ctx context.Context,
-	input string,
-) (string, error) {
-	return a.RunWithObserver(ctx, input, nil)
-}
-
-func (a *recordingAgent) RunWithObserver(
 	_ context.Context,
 	input string,
-	_ agent.Observer,
 ) (string, error) {
 	a.called = true
 	a.input = input
@@ -55,7 +46,6 @@ func TestRunRoutedInputSelectsPlanAgent(t *testing.T) {
 		reactAgent,
 		planAgent,
 		"/plan 复杂任务",
-		nil,
 	)
 	if err != nil {
 		t.Fatalf("runRoutedInput() error = %v", err)

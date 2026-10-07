@@ -1,4 +1,4 @@
-package agent
+package multiagent
 
 import "AgentCLI/internal/plan"
 
@@ -10,8 +10,10 @@ const (
 	PlanCancel  PlanAction = "CANCEL"
 )
 
-type PlanReviewer interface {
-	Review(
+// PlanDecisionProvider asks whether a generated plan should be executed,
+// revised, or cancelled. It is the approval gate before task execution.
+type PlanDecisionProvider interface {
+	Decide(
 		p *plan.Plan,
 	) (
 		action PlanAction,
