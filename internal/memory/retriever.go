@@ -1,6 +1,7 @@
 package memory
 
 import (
+	"AgentCLI/internal/llm"
 	"container/list"
 	"context"
 	"fmt"
@@ -19,11 +20,6 @@ const (
 	minLexicalFraction    = 0.35
 )
 
-// EmbeddingProvider must use the same model for stored text and queries.
-type EmbeddingProvider interface {
-	Embed(ctx context.Context, text string) ([]float32, error)
-}
-
 type MemoryDocument struct {
 	ID    string
 	Text  string
@@ -34,7 +30,7 @@ type MemoryDocument struct {
 // MemoryRetriever combines BM25 and vector rankings. Embeddings are optional;
 // when no provider is configured it uses BM25 alone.
 type MemoryRetriever struct {
-	embedder EmbeddingProvider
+	embedder llm.Embedder
 	mu       sync.Mutex
 	cache    *vectorLRU
 }
@@ -91,13 +87,13 @@ func (cache *vectorLRU) put(key, text string, vector []float32) {
 	}
 }
 
-func NewMemoryRetriever(embedder EmbeddingProvider) *MemoryRetriever {
+func NewMemoryRetriever(embedder llm.Embedder) *MemoryRetriever {
 	return NewMemoryRetrieverWithCacheCapacity(embedder, DefaultVectorCacheEntries)
 }
 
 // NewMemoryRetrieverWithCacheCapacity sets a shared entry limit for query and
 // document vectors. Zero disables caching; negative capacities are treated as zero.
-func NewMemoryRetrieverWithCacheCapacity(embedder EmbeddingProvider, capacity int) *MemoryRetriever {
+func NewMemoryRetrieverWithCacheCapacity(embedder llm.Embedder, capacity int) *MemoryRetriever {
 	if capacity < 0 {
 		capacity = 0
 	}

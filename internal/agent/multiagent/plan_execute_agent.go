@@ -24,6 +24,16 @@ type PlanAndExecuteAgent struct {
 	planTimeout       time.Duration
 	rootMemory        memory.AgentMemoryContext
 	currentQuery      string
+	referenceProvider baseagent.ReferenceContextProvider
+	referenceMessages []llm.Message
+}
+
+type PlanAndExecuteOption func(*PlanAndExecuteAgent)
+
+func WithReferenceContextProvider(provider baseagent.ReferenceContextProvider) PlanAndExecuteOption {
+	return func(agent *PlanAndExecuteAgent) {
+		agent.referenceProvider = provider
+	}
 }
 
 var _ baseagent.Agent = (*PlanAndExecuteAgent)(nil)
@@ -41,6 +51,7 @@ func NewPlanAndExecuteAgent(
 	maxWorkers int,
 	taskTimeout time.Duration,
 	planTimeout time.Duration,
+	options ...PlanAndExecuteOption,
 ) (*PlanAndExecuteAgent, error) {
 	if planner == nil {
 		return nil, fmt.Errorf("configure planner: SubAgent is nil")
@@ -55,16 +66,22 @@ func NewPlanAndExecuteAgent(
 		return nil, fmt.Errorf("configure memory runtime: nil")
 	}
 	rootMemory := memoryRuntime.RootContext()
-	return &PlanAndExecuteAgent{
+	agent := &PlanAndExecuteAgent{
 		planner:           planner,
-		executor:          newTaskExecutor(client, tools, memoryRuntime, reviewer),
 		scheduler:         newTaskScheduler(maxWorkers, taskTimeout),
 		memoryRuntime:     memoryRuntime,
 		decisionProvider:  decisionProvider,
 		maxReplanAttempts: maxReplanAttempts,
 		planTimeout:       planTimeout,
 		rootMemory:        rootMemory,
-	}, nil
+	}
+	for _, option := range options {
+		if option != nil {
+			option(agent)
+		}
+	}
+	agent.executor = newTaskExecutor(client, tools, memoryRuntime, reviewer, agent.referenceProvider)
+	return agent, nil
 }
 
 func (a *PlanAndExecuteAgent) Run(
@@ -75,6 +92,11 @@ func (a *PlanAndExecuteAgent) Run(
 	if err := ctx.Err(); err != nil {
 		return "", err
 	}
+	referenceMessages, err := buildReferenceContext(ctx, a.referenceProvider, input)
+	if err != nil {
+		return "", err
+	}
+	a.referenceMessages = referenceMessages
 	if _, err := a.storePlanMessage(llm.UserMessage(input)); err != nil {
 		return "", fmt.Errorf("store plan user message: %w", err)
 	}
@@ -277,6 +299,24 @@ func (a *PlanAndExecuteAgent) planningMessages(
 	)
 	if err != nil {
 		return nil, fmt.Errorf("build plan conversation context: %w", err)
+	}
+	result := make([]llm.Message, 0, len(a.referenceMessages)+len(messages))
+	result = append(result, a.referenceMessages...)
+	result = append(result, messages...)
+	return result, nil
+}
+
+func buildReferenceContext(
+	ctx context.Context,
+	provider baseagent.ReferenceContextProvider,
+	query string,
+) ([]llm.Message, error) {
+	if provider == nil {
+		return nil, nil
+	}
+	messages, err := provider.Build(ctx, query)
+	if err != nil {
+		return nil, fmt.Errorf("build plan workspace context: %w", err)
 	}
 	return messages, nil
 }

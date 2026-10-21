@@ -47,6 +47,7 @@ func newTestWorkerExecutor(
 		tool.NewToolRegistry(),
 		newTestMemoryRuntime(t, client),
 		reviewer,
+		nil,
 	)
 }
 

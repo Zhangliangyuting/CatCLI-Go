@@ -37,6 +37,14 @@ func ExecuteCommandHandler(
 	ctx context.Context,
 	args map[string]interface{},
 ) (string, error) {
+	return executeCommandHandler(ctx, args, "")
+}
+
+func executeCommandHandler(
+	ctx context.Context,
+	args map[string]interface{},
+	workingDirectory string,
+) (string, error) {
 	if err := ctx.Err(); err != nil {
 		return "", err
 	}
@@ -73,6 +81,9 @@ func ExecuteCommandHandler(
 	defer cancel()
 
 	cmd := exec.CommandContext(commandCtx, parts[0], parts[1:]...)
+	if workingDirectory != "" {
+		cmd.Dir = workingDirectory
+	}
 	output, err := cmd.CombinedOutput()
 
 	if errors.Is(commandCtx.Err(), context.Canceled) {

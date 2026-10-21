@@ -22,10 +22,11 @@ type TaskExecution struct {
 // TaskExecutor creates a Worker, executes one task, and asks the Reviewer to
 // validate the result. Scheduling and timeouts remain TaskScheduler concerns.
 type TaskExecutor struct {
-	client        *llm.OpenAICompatibleClient
-	tools         *tool.ToolRegistry
-	memoryRuntime *memory.ConversationRuntime
-	reviewer      *ReviewerSubAgent
+	client            *llm.OpenAICompatibleClient
+	tools             *tool.ToolRegistry
+	memoryRuntime     *memory.ConversationRuntime
+	reviewer          *ReviewerSubAgent
+	referenceProvider baseagent.ReferenceContextProvider
 }
 
 func newTaskExecutor(
@@ -33,12 +34,17 @@ func newTaskExecutor(
 	tools *tool.ToolRegistry,
 	memoryRuntime *memory.ConversationRuntime,
 	reviewer *ReviewerSubAgent,
+	referenceProvider baseagent.ReferenceContextProvider,
 ) *TaskExecutor {
+	if reviewer != nil {
+		reviewer.ConfigureReferenceContext(referenceProvider)
+	}
 	return &TaskExecutor{
-		client:        client,
-		tools:         tools,
-		memoryRuntime: memoryRuntime,
-		reviewer:      reviewer,
+		client:            client,
+		tools:             tools,
+		memoryRuntime:     memoryRuntime,
+		reviewer:          reviewer,
+		referenceProvider: referenceProvider,
 	}
 }
 
@@ -111,5 +117,6 @@ func (executor *TaskExecutor) newWorker(taskID string) (baseagent.Agent, error) 
 	if err := worker.ConfigureMemory(taskRuntime.AgentMemoryContext); err != nil {
 		return nil, err
 	}
+	worker.ConfigureReferenceContext(executor.referenceProvider)
 	return worker, nil
 }

@@ -384,6 +384,8 @@ The `builtin` provider currently exposes these tools:
 
 ## Learning Path
 
+For a guided tour of workspace indexing, hybrid retrieval, and Agent integration, see the [RAG learning guide (中文)](docs/learning/rag-learning-guide.md).
+
 If you want to study how the agent is built, a good progression is:
 
 1. Understand the `Agent` interface in `internal/agent/agent.go`.
@@ -405,6 +407,7 @@ This keeps the codebase small enough to understand while still showing the full 
 ```text
 cmd/catcli/                 CLI entrypoint
 config/                     Runtime and example YAML config
+docs/learning/              Source-reading guides
 internal/agent/             Agent interface, ReAct loop, events, and Multi-Agent execution
 internal/cli/               Reusable CLI-specific implementations
 internal/config/            Viper-based config loading

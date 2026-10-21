@@ -7,20 +7,28 @@ import (
 	"AgentCLI/internal/config"
 	"AgentCLI/internal/llm"
 	"AgentCLI/internal/memory"
+	"AgentCLI/internal/rag"
 	"AgentCLI/internal/routing"
 	"AgentCLI/internal/tool"
+	workspacepkg "AgentCLI/internal/workspace"
 	"bufio"
 	"context"
 	"errors"
 	"fmt"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strings"
 )
 
 func main() {
 	printBanner()
 	printHelp()
+	currentWorkspace, err := workspacepkg.FromCurrentDirectory()
+	if err != nil {
+		fmt.Println("workspace error:", err)
+		return
+	}
 
 	// 加载环境变量配置
 	cfg, err := config.Load()
@@ -50,10 +58,10 @@ func main() {
 	*/
 
 	//2. 注册工具 -- 通过 Provider动态注册
-	//toolRegistry.RegisterProvider(tool.NewBuiltinProvider())
+	//toolRegistry.RegisterProvider(tool.NewBuiltinProvider(currentWorkspace))
 
 	//3. 注册工具 -- 配置文件控制启用的Provider和工具
-	providers, err := tool.Providers(cfg.Providers.Enabled)
+	providers, err := tool.Providers(cfg.Providers.Enabled, currentWorkspace)
 	if err != nil {
 		fmt.Println("provider error:", err)
 		return
@@ -65,7 +73,7 @@ func main() {
 	}
 
 	// Hybrid retrieval uses the configured embeddings model when available.
-	var embedder memory.EmbeddingProvider
+	var embedder llm.Embedder
 	if model := strings.TrimSpace(cfg.Embedding.Model); model != "" {
 		apiKey := strings.TrimSpace(cfg.Embedding.APIKey)
 		if apiKey == "" {
@@ -79,12 +87,22 @@ func main() {
 			APIKey: apiKey, BaseURL: baseURL, Model: model, HTTPClient: client.HTTPClient,
 		}
 	}
+	referenceProvider, ragStore, err := buildWorkspaceRAG(
+		context.Background(), currentWorkspace, embedder, cfg,
+	)
+	if err != nil {
+		fmt.Println("workspace RAG error:", err)
+		return
+	}
+	if ragStore != nil {
+		defer ragStore.Close()
+	}
 	retriever := memory.NewMemoryRetriever(embedder)
 	// 创建或恢复当前对话的短期记忆，并接入共享检索器和自动压缩。
 	memoryRuntime, err := memory.NewConversationRuntime(
 		client,
 		retriever,
-		".catcli",
+		currentWorkspace.MetadataDir(),
 		os.Getenv("CATCLI_CONVERSATION_ID"),
 		cfg.OpenAICompatible.UsableInputTokens(),
 		cfg.OpenAICompatible.CompactionMaxTokens,
@@ -102,6 +120,7 @@ func main() {
 		agent.WithCompactionScheduler(rootMemory.Scheduler),
 		agent.WithRequestTokenEstimator(rootMemory.Estimator),
 		agent.WithTranscript(rootMemory.Transcript, rootMemory.ConversationID),
+		agent.WithReferenceContextProvider(referenceProvider),
 	)
 	factExtractor, err := memory.NewLLMFactExtractor(client)
 	if err != nil {
@@ -147,6 +166,7 @@ func main() {
 		cfg.Agent.MaxWorkers,
 		cfg.Agent.TaskTimeout,
 		cfg.Agent.PlanTimeout,
+		multiagent.WithReferenceContextProvider(referenceProvider),
 	)
 	if err != nil {
 		fmt.Println("plan-and-execute SubAgent error:", err)
@@ -227,6 +247,74 @@ func main() {
 		fmt.Println(answer)
 	}
 
+}
+
+func buildWorkspaceRAG(
+	ctx context.Context,
+	work *workspacepkg.Workspace,
+	embedder llm.Embedder,
+	cfg config.Config,
+) (agent.ReferenceContextProvider, *rag.SQLiteStore, error) {
+	if !cfg.RAG.Enabled || embedder == nil {
+		return nil, nil, nil
+	}
+	store, err := rag.NewSQLiteStore(filepath.Join(work.MetadataDir(), "rag.db"))
+	if err != nil {
+		return nil, nil, err
+	}
+	closeOnError := func(err error) (agent.ReferenceContextProvider, *rag.SQLiteStore, error) {
+		_ = store.Close()
+		return nil, nil, err
+	}
+	chunkers := rag.NewDefaultChunkerSet(rag.ChunkConfig{})
+	indexer, err := rag.NewWorkspaceIndexer(
+		work,
+		chunkers,
+		embedder,
+		store,
+		rag.WorkspaceIndexerConfig{
+			MaxFileBytes:       cfg.RAG.MaxFileBytes,
+			EmbeddingBatchSize: cfg.RAG.EmbeddingBatchSize,
+			EmbeddingModel:     cfg.Embedding.Model,
+		},
+	)
+	if err != nil {
+		return closeOnError(err)
+	}
+	report, err := indexer.Index(ctx)
+	if err != nil {
+		return closeOnError(err)
+	}
+	fmt.Printf(
+		"Workspace RAG: indexed=%d unchanged=%d deleted=%d chunks=%d rebuilt=%t\n",
+		report.IndexedFiles,
+		report.UnchangedFiles,
+		report.DeletedFiles,
+		report.Chunks,
+		report.RebuiltIndex,
+	)
+	retriever, err := rag.NewRetriever(store, embedder)
+	if err != nil {
+		return closeOnError(err)
+	}
+	formatter, err := rag.NewSearchResultFormatter(memory.ApproxTokenCounter{})
+	if err != nil {
+		return closeOnError(err)
+	}
+	maxContextTokens := min(cfg.RAG.MaxContextTokens, cfg.OpenAICompatible.UsableInputTokens()/5)
+	if maxContextTokens <= 0 {
+		return closeOnError(fmt.Errorf("workspace RAG context budget is empty"))
+	}
+	provider, err := rag.NewContextProvider(
+		retriever,
+		formatter,
+		maxContextTokens,
+		cfg.RAG.SearchLimit,
+	)
+	if err != nil {
+		return closeOnError(err)
+	}
+	return provider, store, nil
 }
 
 func runRoutedInput(

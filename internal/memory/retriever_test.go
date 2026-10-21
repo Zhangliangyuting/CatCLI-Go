@@ -19,6 +19,18 @@ func (e *fixtureEmbedder) Embed(_ context.Context, text string) ([]float32, erro
 	}
 }
 
+func (e *fixtureEmbedder) EmbedBatch(ctx context.Context, texts []string) ([][]float32, error) {
+	vectors := make([][]float32, len(texts))
+	for i, text := range texts {
+		vector, err := e.Embed(ctx, text)
+		if err != nil {
+			return nil, err
+		}
+		vectors[i] = vector
+	}
+	return vectors, nil
+}
+
 func TestMemoryRetrieverCombinesLexicalAndSemanticResults(t *testing.T) {
 	embedder := &fixtureEmbedder{calls: map[string]int{}}
 	retriever := NewMemoryRetriever(embedder)
@@ -61,6 +73,18 @@ type scoredEmbedder struct{ vectors map[string][]float32 }
 
 func (e scoredEmbedder) Embed(_ context.Context, text string) ([]float32, error) {
 	return e.vectors[text], nil
+}
+
+func (e scoredEmbedder) EmbedBatch(ctx context.Context, texts []string) ([][]float32, error) {
+	vectors := make([][]float32, len(texts))
+	for i, text := range texts {
+		vector, err := e.Embed(ctx, text)
+		if err != nil {
+			return nil, err
+		}
+		vectors[i] = vector
+	}
+	return vectors, nil
 }
 
 func TestMemoryRetrieverDoesNotFillLimitWithWeakMatches(t *testing.T) {

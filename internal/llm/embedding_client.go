@@ -19,13 +19,31 @@ type OpenAIEmbeddingClient struct {
 }
 
 func (c *OpenAIEmbeddingClient) Embed(ctx context.Context, text string) ([]float32, error) {
+	vectors, err := c.embed(ctx, text, 1)
+	if err != nil {
+		return nil, err
+	}
+	return vectors[0], nil
+}
+
+// EmbedBatch converts several texts in one embeddings request. Returned
+// vectors preserve the order of texts, even if the endpoint returns data in a
+// different order.
+func (c *OpenAIEmbeddingClient) EmbedBatch(ctx context.Context, texts []string) ([][]float32, error) {
+	if len(texts) == 0 {
+		return [][]float32{}, nil
+	}
+	return c.embed(ctx, texts, len(texts))
+}
+
+func (c *OpenAIEmbeddingClient) embed(ctx context.Context, input any, expected int) ([][]float32, error) {
 	if c == nil || c.APIKey == "" || c.BaseURL == "" || c.Model == "" {
 		return nil, fmt.Errorf("embedding client is not configured")
 	}
 	body, err := json.Marshal(struct {
 		Model string `json:"model"`
-		Input string `json:"input"`
-	}{c.Model, text})
+		Input any    `json:"input"`
+	}{c.Model, input})
 	if err != nil {
 		return nil, err
 	}
@@ -54,13 +72,27 @@ func (c *OpenAIEmbeddingClient) Embed(ctx context.Context, text string) ([]float
 	var result struct {
 		Data []struct {
 			Embedding []float32 `json:"embedding"`
+			Index     int       `json:"index"`
 		} `json:"data"`
 	}
 	if err := json.Unmarshal(payload, &result); err != nil {
 		return nil, fmt.Errorf("decode embedding response: %w", err)
 	}
-	if len(result.Data) != 1 || len(result.Data[0].Embedding) == 0 {
-		return nil, fmt.Errorf("embedding response has no vector")
+	if len(result.Data) != expected {
+		return nil, fmt.Errorf("embedding response returned %d vectors, want %d", len(result.Data), expected)
 	}
-	return result.Data[0].Embedding, nil
+	vectors := make([][]float32, expected)
+	for _, item := range result.Data {
+		if item.Index < 0 || item.Index >= expected {
+			return nil, fmt.Errorf("embedding response index %d is out of range", item.Index)
+		}
+		if vectors[item.Index] != nil {
+			return nil, fmt.Errorf("embedding response contains duplicate index %d", item.Index)
+		}
+		if len(item.Embedding) == 0 {
+			return nil, fmt.Errorf("embedding response vector %d is empty", item.Index)
+		}
+		vectors[item.Index] = item.Embedding
+	}
+	return vectors, nil
 }

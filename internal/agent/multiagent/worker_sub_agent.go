@@ -22,6 +22,13 @@ type WorkerSubAgent struct {
 	requestEstimator    memory.RequestTokenEstimator
 	transcript          memory.TranscriptStore
 	conversationID      string
+	referenceProvider   baseagent.ReferenceContextProvider
+}
+
+func (agent *WorkerSubAgent) ConfigureReferenceContext(provider baseagent.ReferenceContextProvider) {
+	if agent != nil {
+		agent.referenceProvider = provider
+	}
 }
 
 var _ baseagent.Agent = (*WorkerSubAgent)(nil)
@@ -68,6 +75,10 @@ func (agent *WorkerSubAgent) Run(ctx context.Context, input string) (string, err
 	if agent.memoryManager == nil {
 		return agent.SubAgent.Run(ctx, input)
 	}
+	referenceMessages, err := buildReferenceContext(ctx, agent.referenceProvider, input)
+	if err != nil {
+		return "", err
+	}
 	if _, err := agent.storeMessage(llm.UserMessage(input), ""); err != nil {
 		return "", fmt.Errorf("store worker user message: %w", err)
 	}
@@ -77,7 +88,7 @@ func (agent *WorkerSubAgent) Run(ctx context.Context, input string) (string, err
 		if err := ctx.Err(); err != nil {
 			return "", err
 		}
-		if err := agent.compactContext(ctx, input, definitions); err != nil {
+		if err := agent.compactContext(ctx, input, definitions, referenceMessages); err != nil {
 			return "", err
 		}
 		messages, err := agent.contextBuilder.BuildWithReport(
@@ -90,7 +101,7 @@ func (agent *WorkerSubAgent) Run(ctx context.Context, input string) (string, err
 		if err != nil {
 			return "", fmt.Errorf("build worker context: %w", err)
 		}
-		messages = append([]llm.Message{llm.SystemMessage(agent.systemPrompt)}, messages...)
+		messages = workerRequestMessages(agent.systemPrompt, referenceMessages, messages)
 		estimated, err := agent.requestEstimator.Estimate(messages, definitions)
 		if err != nil {
 			return "", fmt.Errorf("estimate worker request tokens: %w", err)
@@ -126,13 +137,14 @@ func (agent *WorkerSubAgent) compactContext(
 	ctx context.Context,
 	query string,
 	definitions []tool.Definition,
+	referenceMessages []llm.Message,
 ) error {
 	measure := func() (int, error) {
 		messages, err := agent.contextBuilder.Build(ctx, query)
 		if err != nil {
 			return 0, err
 		}
-		messages = append([]llm.Message{llm.SystemMessage(agent.SystemPrompt())}, messages...)
+		messages = workerRequestMessages(agent.SystemPrompt(), referenceMessages, messages)
 		return agent.requestEstimator.Estimate(messages, definitions)
 	}
 	decisions, err := agent.compactionScheduler.CompactToFit(ctx, agent.memoryManager, measure)
@@ -141,6 +153,18 @@ func (agent *WorkerSubAgent) compactContext(
 		return fmt.Errorf("compact worker context: %w", err)
 	}
 	return nil
+}
+
+func workerRequestMessages(
+	systemPrompt string,
+	referenceMessages []llm.Message,
+	conversationMessages []llm.Message,
+) []llm.Message {
+	messages := make([]llm.Message, 0, 1+len(referenceMessages)+len(conversationMessages))
+	messages = append(messages, llm.SystemMessage(systemPrompt))
+	messages = append(messages, referenceMessages...)
+	messages = append(messages, conversationMessages...)
+	return messages
 }
 
 func (agent *WorkerSubAgent) storeMessage(message llm.Message, toolName string) (memory.Entry, error) {

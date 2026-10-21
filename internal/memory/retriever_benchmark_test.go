@@ -23,6 +23,18 @@ func (benchmarkEmbedder) Embed(_ context.Context, text string) ([]float32, error
 	return vector, nil
 }
 
+func (e benchmarkEmbedder) EmbedBatch(ctx context.Context, texts []string) ([][]float32, error) {
+	vectors := make([][]float32, len(texts))
+	for i, text := range texts {
+		vector, err := e.Embed(ctx, text)
+		if err != nil {
+			return nil, err
+		}
+		vectors[i] = vector
+	}
+	return vectors, nil
+}
+
 func BenchmarkMemoryRetrieverSearch(b *testing.B) {
 	for _, count := range []int{10, 100, 1000} {
 		docs := make([]MemoryDocument, count)
@@ -35,7 +47,7 @@ func BenchmarkMemoryRetrieverSearch(b *testing.B) {
 		}
 		for _, mode := range []string{"BM25", "HybridCached"} {
 			b.Run(fmt.Sprintf("%s/%d", mode, count), func(b *testing.B) {
-				var embedder EmbeddingProvider
+				var embedder llm.Embedder
 				if mode == "HybridCached" {
 					embedder = benchmarkEmbedder{}
 				}

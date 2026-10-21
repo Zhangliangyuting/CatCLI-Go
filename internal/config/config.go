@@ -16,6 +16,7 @@ type Config struct {
 	Debug            bool                   `mapstructure:"debug"`
 	OpenAICompatible OpenAICompatibleConfig `mapstructure:"openai_compatible"`
 	Embedding        EmbeddingConfig        `mapstructure:"embedding"`
+	RAG              RAGConfig              `mapstructure:"rag"`
 	Agent            AgentConfig            `mapstructure:"agent"`
 	Providers        ProvidersConfig        `mapstructure:"providers"`
 	Tools            ToolsConfig            `mapstructure:"tools"`
@@ -35,6 +36,14 @@ type EmbeddingConfig struct {
 	Model   string `mapstructure:"model"`
 	BaseURL string `mapstructure:"base_url"`
 	APIKey  string `mapstructure:"api_key"`
+}
+
+type RAGConfig struct {
+	Enabled            bool  `mapstructure:"enabled"`
+	MaxFileBytes       int64 `mapstructure:"max_file_bytes"`
+	EmbeddingBatchSize int   `mapstructure:"embedding_batch_size"`
+	SearchLimit        int   `mapstructure:"search_limit"`
+	MaxContextTokens   int   `mapstructure:"max_context_tokens"`
 }
 
 type AgentConfig struct {
@@ -143,6 +152,13 @@ func defaultConfig() Config {
 			TaskTimeout:       5 * time.Minute,
 			PlanTimeout:       30 * time.Minute,
 		},
+		RAG: RAGConfig{
+			Enabled:            true,
+			MaxFileBytes:       1 << 20,
+			EmbeddingBatchSize: 64,
+			SearchLimit:        20,
+			MaxContextTokens:   4096,
+		},
 		Providers: ProvidersConfig{
 			Enabled: []string{"builtin"},
 		},
@@ -168,6 +184,11 @@ func setDefaults(v *viper.Viper, cfg Config) {
 	v.SetDefault("agent.max_workers", cfg.Agent.MaxWorkers)
 	v.SetDefault("agent.task_timeout", cfg.Agent.TaskTimeout)
 	v.SetDefault("agent.plan_timeout", cfg.Agent.PlanTimeout)
+	v.SetDefault("rag.enabled", cfg.RAG.Enabled)
+	v.SetDefault("rag.max_file_bytes", cfg.RAG.MaxFileBytes)
+	v.SetDefault("rag.embedding_batch_size", cfg.RAG.EmbeddingBatchSize)
+	v.SetDefault("rag.search_limit", cfg.RAG.SearchLimit)
+	v.SetDefault("rag.max_context_tokens", cfg.RAG.MaxContextTokens)
 	v.SetDefault("tools.enabled", cfg.Tools.Enabled)
 	v.SetDefault("providers.enabled", cfg.Providers.Enabled)
 }
@@ -214,6 +235,18 @@ func (c Config) validate() error {
 	}
 	if c.Agent.PlanTimeout < c.Agent.TaskTimeout {
 		return errors.New("agent.plan_timeout must not be shorter than agent.task_timeout")
+	}
+	if c.RAG.MaxFileBytes <= 0 {
+		return errors.New("rag.max_file_bytes must be positive")
+	}
+	if c.RAG.EmbeddingBatchSize <= 0 {
+		return errors.New("rag.embedding_batch_size must be positive")
+	}
+	if c.RAG.SearchLimit <= 0 {
+		return errors.New("rag.search_limit must be positive")
+	}
+	if c.RAG.MaxContextTokens <= 0 {
+		return errors.New("rag.max_context_tokens must be positive")
 	}
 	return nil
 }

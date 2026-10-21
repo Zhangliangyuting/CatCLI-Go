@@ -21,6 +21,8 @@ type ReActAgent struct {
 	transcript          memory.TranscriptStore
 	conversationID      string
 	systemMessage       llm.Message
+	referenceProvider   ReferenceContextProvider
+	referenceMessages   []llm.Message
 }
 
 var _ Agent = (*ReActAgent)(nil)
@@ -68,6 +70,12 @@ func WithSystemPrompt(prompt string) ReActAgentOption {
 	}
 }
 
+func WithReferenceContextProvider(provider ReferenceContextProvider) ReActAgentOption {
+	return func(agent *ReActAgent) {
+		agent.referenceProvider = provider
+	}
+}
+
 // WithTranscript records every protocol message when it is added to the
 // agent's Manager. The transcript is an append-only audit log; active context
 // still comes from the Manager and its resumable ConversationState.
@@ -108,6 +116,11 @@ func (a *ReActAgent) Run(
 	userInput string,
 ) (string, error) {
 	a.currentQuery = userInput
+	referenceMessages, err := buildReferenceContext(ctx, a.referenceProvider, userInput)
+	if err != nil {
+		return "", err
+	}
+	a.referenceMessages = referenceMessages
 	if _, err := a.storeMessage(llm.UserMessage(userInput), ""); err != nil {
 		return "", fmt.Errorf("store user message: %w", err)
 	}
@@ -249,6 +262,21 @@ func (a *ReActAgent) ClearHistory() {
 	a.memoryManager.Clear()
 }
 
+func buildReferenceContext(
+	ctx context.Context,
+	provider ReferenceContextProvider,
+	query string,
+) ([]llm.Message, error) {
+	if provider == nil {
+		return nil, nil
+	}
+	messages, err := provider.Build(ctx, query)
+	if err != nil {
+		return nil, fmt.Errorf("build reference context: %w", err)
+	}
+	return messages, nil
+}
+
 func (a *ReActAgent) contextMessages() ([]llm.Message, error) {
 	return a.contextMessagesFor(context.Background())
 }
@@ -264,5 +292,9 @@ func (a *ReActAgent) contextMessagesFor(ctx context.Context) ([]llm.Message, err
 		return nil, fmt.Errorf("build conversation context: %w", err)
 	}
 
-	return append([]llm.Message{a.systemMessage}, messages...), nil
+	result := make([]llm.Message, 0, 1+len(a.referenceMessages)+len(messages))
+	result = append(result, a.systemMessage)
+	result = append(result, a.referenceMessages...)
+	result = append(result, messages...)
+	return result, nil
 }

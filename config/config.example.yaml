@@ -12,6 +12,20 @@ openai_compatible:
   # Maximum output for structured Micro/Session/Full compaction requests.
   compaction_max_tokens: 4096
 
+# Leave model empty to disable embedding-based memory retrieval and workspace RAG.
+embedding:
+  model: ""
+  # Empty values reuse openai_compatible.base_url and api_key.
+  base_url: ""
+  api_key: ""
+
+rag:
+  enabled: true
+  max_file_bytes: 1048576
+  embedding_batch_size: 64
+  search_limit: 20
+  max_context_tokens: 4096
+
 agent:
   max_replan_attempts: 3
   max_workers: 3

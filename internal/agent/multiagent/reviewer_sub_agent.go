@@ -19,6 +19,7 @@ const ReviewerSystemPrompt = `你是独立的任务结果检查者。请根据�
 // ReviewerSubAgent is both a SubAgent and a typed result reviewer.
 type ReviewerSubAgent struct {
 	*SubAgent
+	referenceProvider baseagent.ReferenceContextProvider
 }
 
 var _ baseagent.Agent = (*ReviewerSubAgent)(nil)
@@ -26,6 +27,12 @@ var _ baseagent.Agent = (*ReviewerSubAgent)(nil)
 type ResultReview struct {
 	Approved bool   `json:"approved"`
 	Feedback string `json:"feedback"`
+}
+
+func (agent *ReviewerSubAgent) ConfigureReferenceContext(provider baseagent.ReferenceContextProvider) {
+	if agent != nil {
+		agent.referenceProvider = provider
+	}
 }
 
 type ResultRejectedError struct {
@@ -78,7 +85,12 @@ func (agent *ReviewerSubAgent) ReviewResult(
 		return ResultReview{}, fmt.Errorf("encode result review input: %w", err)
 	}
 
-	content, err := agent.Run(ctx, string(payload))
+	referenceMessages, err := buildReferenceContext(ctx, agent.referenceProvider, execution.Prompt)
+	if err != nil {
+		return ResultReview{}, err
+	}
+	messages := append(referenceMessages, llm.UserMessage(string(payload)))
+	content, err := agent.RunMessages(ctx, messages)
 	if err != nil {
 		return ResultReview{}, fmt.Errorf("review task result: %w", err)
 	}
