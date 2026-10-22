@@ -291,10 +291,10 @@ func (retriever *Retriever) Search(
 
 ```text
 用户问题
-  ├── codeTerms() 提取关键词
+  ├── queryCodeTerms() 清理问句套话、提取关键词
   │      └── BM25 关键词评分
   │
-  └── Embed() 生成查询向量
+  └── Embed() 使用完整原问题生成查询向量
          └── 余弦相似度评分
 
 两路结果
@@ -320,6 +320,8 @@ vectorCosine()
 - BM25：找“字面上相同”的代码
 - Embedding：找“语义上相似”的代码
 - Rank Fusion：合并两路排序
+
+[query_terms.go](../../internal/rag/query_terms.go) 维护小型问句套话表和中文停用词表。仅在 BM25 查询侧，先将“帮我看一下”“你知道”“什么是”等套话替换为空格，避免它们生成跨词的中文双字片段，再过滤独立的“吗”“呢”“的”等词项。文档分词和 embedding 输入保留原文，不需要重建向量索引。词表采用项目内手工维护的保守列表，不是完整的中文分词或关键词提取器；后续应根据实际查询补充。
 
 配合测试看：
 
@@ -380,6 +382,20 @@ Agent 会优先调用可选的 `BuildWithReport()`，将检索报告转换为 `E
 ```
 
 `matches` 是本次检索返回的候选片段数（受检索数量上限限制），`included` 是按 token 预算实际纳入的片段数。首次后台索引尚未就绪时会显示 `skipped=index_not_ready`；检索错误会显示 `error`。debug 模式将片段分为“已纳入上下文”和“未纳入上下文”，按编号显示路径、行号、符号或标题及评分，不打印完整 ID 和源码。多 Agent 子任务的日志使用对应任务 ID。
+
+debug 模式还会在片段清单前显示分阶段耗时：
+
+```text
+[agent]   RAG 耗时：load=20ms lexical=15ms embedding=46.4s ranking=5ms format=10ms
+```
+
+- `load`：读取 SQLite 片段及解码向量，包含等待数据库连接的时间。
+- `lexical`：查询清理、片段分词和 BM25 评分。
+- `embedding`：完整的问题向量化请求，包括服务端可能发生的排队、加载和推理；此计时本身无法区分这些内部步骤。
+- `ranking`：本地余弦相似度计算、RRF 融合、排序和结果组装。
+- `format`：按 token 预算生成参考文本。
+
+错误发生时仍保留已执行阶段的耗时；未执行的阶段显示 `0s`。总 `duration` 还包含少量调度和消息构造开销，不包含后续聊天模型回答时间，也不包含 Observer 打印日志的时间。
 
 这就是 RAG 的上下文增强（Augmentation）步骤，之后由聊天模型根据参考资料生成回答。
 

@@ -18,6 +18,7 @@ func TestConsoleObserverWorkspaceRetrievalDetails(t *testing.T) {
 		Duration: 5 * time.Millisecond, Matches: []rag.SearchResult{result, {
 			ID: "chunk-2", Chunk: rag.Chunk{Path: "guide.md", Heading: "使用说明", Content: "excluded content"},
 		}}, Included: []rag.SearchResult{result},
+		Timings: rag.RetrievalTimings{Load: time.Microsecond, Lexical: 2 * time.Microsecond, Embedding: 4 * time.Millisecond, Ranking: 3 * time.Microsecond, Format: 4 * time.Microsecond},
 	}}
 	var normal, debug bytes.Buffer
 	newConsoleObserver(&normal, false)(event)
@@ -25,6 +26,9 @@ func TestConsoleObserverWorkspaceRetrievalDetails(t *testing.T) {
 		t.Fatalf("normal output = %q", normal.String())
 	}
 	newConsoleObserver(&debug, true)(event)
+	if !strings.Contains(debug.String(), "RAG 耗时：load=1µs lexical=2µs embedding=4ms ranking=3µs format=4µs") || strings.Contains(normal.String(), "RAG 耗时") {
+		t.Fatalf("timing detail visibility: normal=%s debug=%s", normal.String(), debug.String())
+	}
 	for _, want := range []string{"RAG 已纳入上下文（1 个 Chunk）", "01. private.go:3-5 | Secret", "RAG 未纳入上下文（1 个 Chunk）", "guide.md | 使用说明", "BM25=", "cosine=", "RRF="} {
 		if !strings.Contains(debug.String(), want) {
 			t.Fatalf("debug output missing %q: %s", want, debug.String())

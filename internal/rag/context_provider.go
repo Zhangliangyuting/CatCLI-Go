@@ -15,6 +15,7 @@ type RetrievalReport struct {
 	Matches       []SearchResult
 	Included      []SearchResult
 	Duration      time.Duration
+	Timings       RetrievalTimings
 	SkippedReason string
 	Error         string
 }
@@ -76,12 +77,15 @@ func (provider *ContextProvider) BuildWithReport(
 		report.SkippedReason = "empty_provider_or_query"
 		return nil, nil
 	}
-	results, err := provider.retriever.Search(ctx, query, provider.limit)
+	results, timings, err := provider.retriever.SearchWithTimings(ctx, query, provider.limit)
+	report.Timings = timings
 	if err != nil {
 		report.Error = err.Error()
 		return nil, fmt.Errorf("retrieve workspace context: %w", err)
 	}
+	formatStarted := time.Now()
 	formatted := provider.formatter.Format(results, provider.maxTokens)
+	report.Timings.Format = time.Since(formatStarted)
 	report.Matches = results
 	report.Included = formatted.Included
 	if formatted.Text == "" {

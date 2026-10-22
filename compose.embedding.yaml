@@ -3,6 +3,8 @@ services:
   ollama:
     image: ollama/ollama:${OLLAMA_IMAGE_TAG:-latest}
     restart: unless-stopped
+    environment:
+      OLLAMA_KEEP_ALIVE: 1h
     ports:
       # 11434 is already used by the native Windows Ollama installation.
       - "127.0.0.1:11435:11434"
@@ -22,7 +24,40 @@ services:
         condition: service_healthy
     environment:
       OLLAMA_HOST: http://ollama:11434
-    command: ["pull", "bge-m3"]
+    entrypoint: ["/bin/sh", "-ec"]
+    command:
+      - |
+        if ollama show bge-m3 >/dev/null 2>&1; then
+          echo "bge-m3 already exists; skipping pull."
+        else
+          echo "bge-m3 not found; downloading model."
+          ollama pull bge-m3
+        fi
+    restart: "no"
+
+  # The Ollama image has no curl. Warm up only after model initialization succeeds.
+  ollama-model-warmup:
+    image: curlimages/curl:latest
+    depends_on:
+      ollama-model-init:
+        condition: service_completed_successfully
+    command:
+      - --fail
+      - --silent
+      - --show-error
+      - --connect-timeout
+      - "10"
+      - --max-time
+      - "300"
+      - --output
+      - /dev/null
+      - --write-out
+      - "bge-m3 warmup: HTTP %{http_code}\n"
+      - --header
+      - "Content-Type: application/json"
+      - --data
+      - '{"model":"bge-m3","input":"warmup"}'
+      - http://ollama:11434/api/embed
     restart: "no"
 
 volumes:

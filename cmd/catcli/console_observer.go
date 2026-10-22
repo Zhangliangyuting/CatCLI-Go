@@ -56,6 +56,9 @@ func (observer *consoleObserver) observe(event agent.Event) {
 		}
 		fmt.Fprintln(observer.output)
 		if observer.debug {
+			timings := report.Timings
+			fmt.Fprintf(observer.output, "%s   RAG 耗时：load=%s lexical=%s embedding=%s ranking=%s format=%s\n",
+				prefix, timings.Load, timings.Lexical, timings.Embedding, timings.Ranking, timings.Format)
 			included := make(map[string]bool, len(report.Included))
 			for _, result := range report.Included {
 				included[result.ID] = true

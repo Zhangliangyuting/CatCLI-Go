@@ -6,6 +6,7 @@ import (
 	"math"
 	"sort"
 	"strings"
+	"time"
 	"unicode"
 
 	"AgentCLI/internal/llm"
@@ -26,6 +27,16 @@ type SearchResult struct {
 	Score         float64
 }
 
+// RetrievalTimings measures non-overlapping stages. Embedding includes the
+// complete service request; Ranking includes cosine scoring and rank fusion.
+type RetrievalTimings struct {
+	Load      time.Duration
+	Lexical   time.Duration
+	Embedding time.Duration
+	Ranking   time.Duration
+	Format    time.Duration
+}
+
 // Retriever combines code-aware BM25 and embedding cosine rankings. When no
 // embedder is configured, exact and lexical workspace search remain available.
 type Retriever struct {
@@ -41,13 +52,26 @@ func NewRetriever(store ChunkReader, embedder llm.Embedder) (*Retriever, error) 
 }
 
 func (retriever *Retriever) Search(ctx context.Context, query string, limit int) ([]SearchResult, error) {
+	results, _, err := retriever.SearchWithTimings(ctx, query, limit)
+	return results, err
+}
+
+func (retriever *Retriever) SearchWithTimings(ctx context.Context, query string, limit int) ([]SearchResult, RetrievalTimings, error) {
+	var timings RetrievalTimings
+	results, err := retriever.search(ctx, query, limit, &timings)
+	return results, timings, err
+}
+
+func (retriever *Retriever) search(ctx context.Context, query string, limit int, timings *RetrievalTimings) ([]SearchResult, error) {
 	if retriever == nil || limit <= 0 || strings.TrimSpace(query) == "" {
 		return nil, nil
 	}
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
+	started := time.Now()
 	chunks, err := retriever.store.LoadChunks(ctx)
+	timings.Load = time.Since(started)
 	if err != nil {
 		return nil, fmt.Errorf("load RAG index: %w", err)
 	}
@@ -55,17 +79,21 @@ func (retriever *Retriever) Search(ctx context.Context, query string, limit int)
 		return nil, nil
 	}
 
-	queryTerms := codeTerms(query)
+	started = time.Now()
+	queryTerms := queryCodeTerms(query)
 	items := buildRetrievalItems(chunks)
+	timings.Lexical = time.Since(started)
 	if len(items) == 0 {
 		return nil, nil
 	}
 	scoreBM25(queryTerms, items)
+	timings.Lexical = time.Since(started)
 	if retriever.embedder != nil {
-		if err := retriever.scoreSemantic(ctx, query, items); err != nil {
+		if err := retriever.scoreSemantic(ctx, query, items, timings); err != nil {
 			return nil, err
 		}
 	}
+	started = time.Now()
 	fuseRetrievalRanks(items, retriever.embedder != nil)
 
 	sort.SliceStable(items, func(left, right int) bool {
@@ -96,6 +124,7 @@ func (retriever *Retriever) Search(ctx context.Context, query string, limit int)
 			Score:         item.rank,
 		})
 	}
+	timings.Ranking += time.Since(started)
 	return results, nil
 }
 
@@ -169,14 +198,18 @@ func scoreBM25(query []string, items []*retrievalItem) {
 	}
 }
 
-func (retriever *Retriever) scoreSemantic(ctx context.Context, query string, items []*retrievalItem) error {
+func (retriever *Retriever) scoreSemantic(ctx context.Context, query string, items []*retrievalItem, timings *RetrievalTimings) error {
+	started := time.Now()
 	queryVector, err := retriever.embedder.Embed(ctx, query)
+	timings.Embedding = time.Since(started)
 	if err != nil {
 		return fmt.Errorf("embed RAG query: %w", err)
 	}
 	if len(queryVector) == 0 {
 		return fmt.Errorf("RAG query embedding is empty")
 	}
+	started = time.Now()
+	defer func() { timings.Ranking += time.Since(started) }()
 	for _, item := range items {
 		if len(item.chunk.Embedding) != len(queryVector) {
 			return fmt.Errorf(

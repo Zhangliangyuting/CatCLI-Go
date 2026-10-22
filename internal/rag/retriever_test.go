@@ -1,12 +1,15 @@
 package rag
 
 import (
+	"AgentCLI/internal/llm"
 	"context"
 	"errors"
+	"fmt"
 	"math"
 	"slices"
 	"strings"
 	"testing"
+	"time"
 )
 
 type staticChunkReader struct {
@@ -21,9 +24,23 @@ func (reader staticChunkReader) LoadChunks(context.Context) ([]EmbeddedChunk, er
 type queryEmbedder struct {
 	vector []float32
 	err    error
+	query  *string
+	delay  time.Duration
 }
 
-func (embedder queryEmbedder) Embed(context.Context, string) ([]float32, error) {
+func (embedder queryEmbedder) Embed(ctx context.Context, text string) ([]float32, error) {
+	if embedder.delay > 0 {
+		timer := time.NewTimer(embedder.delay)
+		defer timer.Stop()
+		select {
+		case <-timer.C:
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}
+	if embedder.query != nil {
+		*embedder.query = text
+	}
 	return embedder.vector, embedder.err
 }
 
@@ -172,6 +189,87 @@ func TestCodeTermsSplitIdentifiersAndChineseBigrams(t *testing.T) {
 		if !slices.Contains(terms, want) {
 			t.Fatalf("codeTerms() = %v, missing %q", terms, want)
 		}
+	}
+}
+
+func TestQueryCodeTermsRemoveChineseBoilerplate(t *testing.T) {
+	// Keep the full topic out of indexed test source so it is not evidence for itself.
+	const topic = "aes" + "pa"
+	for _, test := range []struct {
+		query string
+		want  []string
+	}{
+		{"你知道什么是 " + topic + " 吗", []string{topic}},
+		{"你知道什么是" + topic + "吗", []string{topic}},
+		{"请问一下，我想知道 " + topic + " 是什么？", []string{topic}},
+		{"能不能帮我解释一下 Workspace.Resolve", []string{"workspace", "resolve"}},
+		{"请问文件如何读取", []string{"文件", "读取"}},
+		{"为什么有序集合不能读取", []string{"有序", "序集", "集合", "合不", "不能", "能读", "读取"}},
+		{"请问什么是", nil},
+	} {
+		t.Run(test.query, func(t *testing.T) {
+			if got := queryCodeTerms(test.query); !slices.Equal(got, test.want) {
+				t.Fatalf("queryCodeTerms() = %v, want %v", got, test.want)
+			}
+		})
+	}
+	query := "请帮我看一下 internal/rag/retriever.go 的 SearchResult 和 content_hash"
+	for _, term := range []string{"internal", "rag", "retriever", "go", "searchresult", "search", "result", "content_hash", "content", "hash"} {
+		if !slices.Contains(queryCodeTerms(query), term) {
+			t.Fatalf("code term %q was lost", term)
+		}
+	}
+}
+
+func TestRetrieverIgnoresQuestionBoilerplateButKeepsOriginalEmbeddingQuery(t *testing.T) {
+	const topic = "aes" + "pa"
+	reader := staticChunkReader{chunks: []EmbeddedChunk{
+		retrievalChunk("guide", "guide.md", "", "section", "你知道什么是 Embedding 吗？我想知道如何构建索引。", []float32{0, 1}),
+		retrievalChunk("code", "workspace.go", "Workspace.Resolve", "method", "func (w *Workspace) Resolve() {}", []float32{0, 1}),
+	}}
+	query := "你知道什么是 " + topic + " 吗"
+	for _, semantic := range []bool{false, true} {
+		t.Run(fmt.Sprint("semantic=", semantic), func(t *testing.T) {
+			var embeddedQuery string
+			var embedder llm.Embedder
+			if semantic {
+				embedder = queryEmbedder{vector: []float32{1, 0}, query: &embeddedQuery}
+			}
+			retriever, err := NewRetriever(reader, embedder)
+			if err != nil {
+				t.Fatal(err)
+			}
+			results, err := retriever.Search(context.Background(), query, 10)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(results) != 0 {
+				t.Fatalf("unrelated question retrieved chunks: %+v", results)
+			}
+			if semantic && embeddedQuery != query {
+				t.Fatalf("embedding received %q, want original %q", embeddedQuery, query)
+			}
+			results, err = retriever.Search(context.Background(), "能不能帮我解释一下 Workspace.Resolve", 10)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(results) != 1 || results[0].ID != "code" {
+				t.Fatalf("symbol search = %+v", results)
+			}
+		})
+	}
+	// Cleaning the query must not discard matching words from indexed content.
+	reader.chunks = append(reader.chunks, retrievalChunk("topic", "notes.md", "", "section", topic, []float32{0, 1}))
+	retriever, err := NewRetriever(reader, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	results, err := retriever.Search(context.Background(), query, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(results) != 1 || results[0].ID != "topic" {
+		t.Fatalf("actual topic match = %+v", results)
 	}
 }
 

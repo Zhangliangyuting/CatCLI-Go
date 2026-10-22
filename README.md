@@ -106,12 +106,14 @@ Set `debug: true` in `config/config.yaml` or `CATCLI_DEBUG=true` in the environm
 
 ### Separate local embedding container
 
-`compose.embedding.yaml` runs Ollama as an independent service, keeps model files in the `ollama-models` volume, and pulls `bge-m3` once the service is healthy. It binds only the host loopback address on port `11435`, leaving a native Ollama installation on `11434` untouched. Start it with:
+`compose.embedding.yaml` runs Ollama as an independent service and keeps model files in the `ollama-models` volume. Once the server is healthy, initialization checks its model library and pulls `bge-m3` only if missing. A separate curl container then sends a small embedding request to load the model, with a five-minute request timeout. `OLLAMA_KEEP_ALIVE: 1h` keeps the model loaded for one hour after requests, subject to available resources. It binds only the host loopback address on port `11435`, leaving a native Ollama installation on `11434` untouched. Start it with:
 
 ```bash
 docker compose -f compose.embedding.yaml up -d
-curl http://localhost:11435/api/tags
+docker compose -f compose.embedding.yaml logs -f ollama-model-init ollama-model-warmup
 ```
+
+Detached startup returns before warmup finishes. Wait for `bge-m3 warmup: HTTP 200` and a successful exit of `ollama-model-warmup` before starting CatCLI for a warm first query. After an Ollama restart or model unload, rerun warmup with `docker compose -f compose.embedding.yaml run --rm --no-deps ollama-model-warmup` once the server and model are available. Model updates are explicit: run `docker compose -f compose.embedding.yaml exec ollama ollama pull bge-m3` when wanted. The warmup helper image is `curlimages/curl:latest`; pin it to a tested tag or digest for deployments.
 
 For a CatCLI process running on the host, set `CATCLI_EMBEDDING_BASE_URL=http://localhost:11435/v1` in `.env`. If CatCLI later runs in the same Compose network, use `http://ollama:11434/v1` instead and remove the published port. Pin `OLLAMA_IMAGE_TAG` to a tested image version for deployments. The container downloads its own copy of `bge-m3`; it does not reuse the model already installed in native Windows Ollama. Docker Desktop's WSL integration must be enabled before running these commands from WSL.
 
@@ -389,6 +391,8 @@ For a guided tour of workspace indexing, hybrid retrieval, and Agent integration
 Workspace indexing runs in the background at startup. A compatible existing index remains searchable during updates; when creating or rebuilding an index, the agent accepts requests without workspace references until indexing succeeds. Indexing errors are reported without stopping chat, and shutdown cancels indexing before closing the database.
 
 Workspace retrieval emits `workspace retrieve` events with match counts, included counts, and duration, including skipped or failed retrievals. Debug output lists included and excluded chunks separately, with numbered source locations, symbols or headings, and scores. Full chunk IDs and source text are omitted from console output.
+
+Debug retrieval output also breaks down database loading, lexical scoring, the query embedding request, local ranking, and formatting time to help locate slow stages.
 
 If you want to study how the agent is built, a good progression is:
 
