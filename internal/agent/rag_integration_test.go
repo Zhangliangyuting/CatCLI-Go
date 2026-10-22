@@ -102,12 +102,21 @@ func TestReActAgentReceivesIndexedWorkspaceContext(t *testing.T) {
 		APIKey: "test", BaseURL: "http://rag.integration", Model: "test-chat", HTTPClient: httpClient,
 	}
 	agent := NewReActAgent(client, tool.NewToolRegistry(), WithReferenceContextProvider(provider))
-	answer, err := agent.Run(context.Background(), "Where is WorkspaceAnswer implemented?")
+	var reports []rag.RetrievalReport
+	ctx := WithObserver(context.Background(), func(event Event) {
+		if event.Type == EventWorkspaceRetrieval && event.WorkspaceRetrieval != nil {
+			reports = append(reports, *event.WorkspaceRetrieval)
+		}
+	})
+	answer, err := agent.Run(ctx, "Where is WorkspaceAnswer implemented?")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if answer != "found indexed workspace context" {
 		t.Fatalf("answer = %q", answer)
+	}
+	if len(reports) != 1 || len(reports[0].Matches) == 0 || len(reports[0].Included) == 0 {
+		t.Fatalf("workspace retrieval reports = %#v", reports)
 	}
 	joined := ""
 	for _, message := range captured.Messages {

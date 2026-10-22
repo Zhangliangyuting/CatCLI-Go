@@ -5,6 +5,7 @@ import (
 	"AgentCLI/internal/llm"
 	"AgentCLI/internal/memory"
 	"AgentCLI/internal/plan"
+	"AgentCLI/internal/rag"
 	"AgentCLI/internal/tool"
 	"context"
 	"errors"
@@ -314,7 +315,15 @@ func buildReferenceContext(
 	if provider == nil {
 		return nil, nil
 	}
-	messages, err := provider.Build(ctx, query)
+	var messages []llm.Message
+	var err error
+	if reporter, ok := provider.(baseagent.ReportingReferenceContextProvider); ok {
+		messages, err = reporter.BuildWithReport(ctx, query, func(report rag.RetrievalReport) {
+			baseagent.Emit(ctx, baseagent.Event{Type: baseagent.EventWorkspaceRetrieval, WorkspaceRetrieval: &report})
+		})
+	} else {
+		messages, err = provider.Build(ctx, query)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("build plan workspace context: %w", err)
 	}

@@ -19,6 +19,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 )
 
 func main() {
@@ -87,15 +88,15 @@ func main() {
 			APIKey: apiKey, BaseURL: baseURL, Model: model, HTTPClient: client.HTTPClient,
 		}
 	}
-	referenceProvider, ragStore, err := buildWorkspaceRAG(
+	referenceProvider, ragRuntime, err := buildWorkspaceRAG(
 		context.Background(), currentWorkspace, embedder, cfg,
 	)
 	if err != nil {
 		fmt.Println("workspace RAG error:", err)
 		return
 	}
-	if ragStore != nil {
-		defer ragStore.Close()
+	if ragRuntime != nil {
+		defer ragRuntime.Close()
 	}
 	retriever := memory.NewMemoryRetriever(embedder)
 	// 创建或恢复当前对话的短期记忆，并接入共享检索器和自动压缩。
@@ -249,12 +250,42 @@ func main() {
 
 }
 
+// workspaceRAG keeps indexing independent of requests. Incompatible or missing
+// indexes stay hidden until a complete indexing pass succeeds.
+type workspaceRAG struct {
+	provider *rag.ContextProvider
+	store    *rag.SQLiteStore
+	ready    atomic.Bool
+	cancel   context.CancelFunc
+	done     chan struct{}
+}
+
+func (runtime *workspaceRAG) Build(ctx context.Context, query string) ([]llm.Message, error) {
+	return runtime.BuildWithReport(ctx, query, nil)
+}
+
+func (runtime *workspaceRAG) BuildWithReport(ctx context.Context, query string, onReport func(rag.RetrievalReport)) ([]llm.Message, error) {
+	if !runtime.ready.Load() {
+		if onReport != nil {
+			onReport(rag.RetrievalReport{SkippedReason: "index_not_ready"})
+		}
+		return nil, nil
+	}
+	return runtime.provider.BuildWithReport(ctx, query, onReport)
+}
+
+func (runtime *workspaceRAG) Close() error {
+	runtime.cancel()
+	<-runtime.done
+	return runtime.store.Close()
+}
+
 func buildWorkspaceRAG(
 	ctx context.Context,
 	work *workspacepkg.Workspace,
 	embedder llm.Embedder,
 	cfg config.Config,
-) (agent.ReferenceContextProvider, *rag.SQLiteStore, error) {
+) (agent.ReferenceContextProvider, *workspaceRAG, error) {
 	if !cfg.RAG.Enabled || embedder == nil {
 		return nil, nil, nil
 	}
@@ -262,7 +293,7 @@ func buildWorkspaceRAG(
 	if err != nil {
 		return nil, nil, err
 	}
-	closeOnError := func(err error) (agent.ReferenceContextProvider, *rag.SQLiteStore, error) {
+	closeOnError := func(err error) (agent.ReferenceContextProvider, *workspaceRAG, error) {
 		_ = store.Close()
 		return nil, nil, err
 	}
@@ -281,18 +312,10 @@ func buildWorkspaceRAG(
 	if err != nil {
 		return closeOnError(err)
 	}
-	report, err := indexer.Index(ctx)
+	metadata, exists, err := store.LoadIndexMetadata(ctx)
 	if err != nil {
 		return closeOnError(err)
 	}
-	fmt.Printf(
-		"Workspace RAG: indexed=%d unchanged=%d deleted=%d chunks=%d rebuilt=%t\n",
-		report.IndexedFiles,
-		report.UnchangedFiles,
-		report.DeletedFiles,
-		report.Chunks,
-		report.RebuiltIndex,
-	)
 	retriever, err := rag.NewRetriever(store, embedder)
 	if err != nil {
 		return closeOnError(err)
@@ -314,7 +337,27 @@ func buildWorkspaceRAG(
 	if err != nil {
 		return closeOnError(err)
 	}
-	return provider, store, nil
+	indexCtx, cancel := context.WithCancel(ctx)
+	runtime := &workspaceRAG{
+		provider: provider, store: store, cancel: cancel, done: make(chan struct{}),
+	}
+	runtime.ready.Store(exists && metadata.EmbeddingModel == strings.TrimSpace(cfg.Embedding.Model) &&
+		metadata.ChunkerVersion == chunkers.Version())
+	fmt.Printf("Workspace RAG: indexing in background (existing index available=%t)\n", runtime.ready.Load())
+	go func() {
+		defer close(runtime.done)
+		report, err := indexer.Index(indexCtx)
+		if err != nil {
+			if !errors.Is(err, context.Canceled) {
+				fmt.Fprintf(os.Stderr, "\nWorkspace RAG indexing error (chat remains available): %v\n", err)
+			}
+			return
+		}
+		runtime.ready.Store(true)
+		fmt.Printf("\nWorkspace RAG ready: indexed=%d unchanged=%d deleted=%d chunks=%d rebuilt=%t\n",
+			report.IndexedFiles, report.UnchangedFiles, report.DeletedFiles, report.Chunks, report.RebuiltIndex)
+	}()
+	return runtime, runtime, nil
 }
 
 func runRoutedInput(

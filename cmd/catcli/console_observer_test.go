@@ -3,11 +3,52 @@ package main
 import (
 	"AgentCLI/internal/agent"
 	"AgentCLI/internal/memory"
+	"AgentCLI/internal/rag"
 	"bytes"
 	"strings"
 	"testing"
 	"time"
 )
+
+func TestConsoleObserverWorkspaceRetrievalDetails(t *testing.T) {
+	result := rag.SearchResult{ID: "chunk-1", Chunk: rag.Chunk{
+		Path: "private.go", Symbol: "Secret", StartLine: 3, EndLine: 5, Content: "private code",
+	}}
+	event := agent.Event{Type: agent.EventWorkspaceRetrieval, TaskID: "task-1", WorkspaceRetrieval: &rag.RetrievalReport{
+		Duration: 5 * time.Millisecond, Matches: []rag.SearchResult{result, {
+			ID: "chunk-2", Chunk: rag.Chunk{Path: "guide.md", Heading: "使用说明", Content: "excluded content"},
+		}}, Included: []rag.SearchResult{result},
+	}}
+	var normal, debug bytes.Buffer
+	newConsoleObserver(&normal, false)(event)
+	if !strings.Contains(normal.String(), "[task-1] 🔎 workspace retrieve matches=2 included=1 duration=5ms") || strings.Contains(normal.String(), "private") {
+		t.Fatalf("normal output = %q", normal.String())
+	}
+	newConsoleObserver(&debug, true)(event)
+	for _, want := range []string{"RAG 已纳入上下文（1 个 Chunk）", "01. private.go:3-5 | Secret", "RAG 未纳入上下文（1 个 Chunk）", "guide.md | 使用说明", "BM25=", "cosine=", "RRF="} {
+		if !strings.Contains(debug.String(), want) {
+			t.Fatalf("debug output missing %q: %s", want, debug.String())
+		}
+	}
+	for _, hidden := range []string{"private code", "excluded content", "chunk-1", "chunk-2", "text="} {
+		if strings.Contains(debug.String(), hidden) {
+			t.Fatalf("debug list contains noisy detail %q: %s", hidden, debug.String())
+		}
+	}
+	for _, report := range []rag.RetrievalReport{
+		{SkippedReason: "index_not_ready"},
+		{Error: "embedding unavailable"},
+		{},
+	} {
+		var output bytes.Buffer
+		newConsoleObserver(&output, false)(agent.Event{Type: agent.EventWorkspaceRetrieval, WorkspaceRetrieval: &report})
+		if !strings.Contains(output.String(), "matches=0 included=0") ||
+			(report.SkippedReason != "" && !strings.Contains(output.String(), "skipped=index_not_ready")) ||
+			(report.Error != "" && !strings.Contains(output.String(), "embedding unavailable")) {
+			t.Fatalf("status output = %q", output.String())
+		}
+	}
+}
 
 func TestConsoleObserverRetrievalHidesTextUnlessDebug(t *testing.T) {
 	event := agent.Event{Type: agent.EventMemoryRetrieval, Retrieval: &memory.RetrievalReport{
@@ -100,6 +141,7 @@ func TestConsoleObserverPrefixesEveryVisibleEventTypeWithEmoji(t *testing.T) {
 		{event: agent.Event{Type: agent.EventMemoryCompaction, Title: "FULL"}, emoji: "🗜️"},
 		{event: agent.Event{Type: agent.EventMemoryFact, Title: "UPSERT"}, emoji: "🧠"},
 		{event: agent.Event{Type: agent.EventMemoryRetrieval, Retrieval: &memory.RetrievalReport{}}, emoji: "🔎"},
+		{event: agent.Event{Type: agent.EventWorkspaceRetrieval, WorkspaceRetrieval: &rag.RetrievalReport{}}, emoji: "🔎"},
 		{event: agent.Event{Type: agent.EventToolCall, Title: "read_file"}, emoji: "🔧"},
 		{event: agent.Event{Type: agent.EventToolResult, Title: "read_file"}, emoji: "📦"},
 		{event: agent.Event{Type: agent.EventResultReview, Title: "通过"}, emoji: "🧐"},

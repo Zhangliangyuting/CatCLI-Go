@@ -2,6 +2,7 @@ package agent
 
 import (
 	"AgentCLI/internal/memory"
+	"AgentCLI/internal/rag"
 	"context"
 	"fmt"
 	"sync"
@@ -10,33 +11,35 @@ import (
 type EventType string
 
 const (
-	EventTokenUsage       EventType = "token_usage"
-	EventMemoryCompaction EventType = "memory_compaction"
-	EventMemoryFact       EventType = "memory_fact"
-	EventMemoryRetrieval  EventType = "memory_retrieval"
-	EventToolCall         EventType = "tool_call"
-	EventToolResult       EventType = "tool_result"
-	EventResultReview     EventType = "result_review"
-	EventTaskStarted      EventType = "task_started"
-	EventTaskCompleted    EventType = "task_completed"
-	EventTaskFailed       EventType = "task_failed"
-	EventTaskCancelled    EventType = "task_cancelled"
-	EventTaskTimeout      EventType = "task_timeout"
-	EventPlanGenerated    EventType = "plan_generated"
-	EventPlanRevised      EventType = "plan_revised"
-	EventPlanCancelled    EventType = "plan_cancelled"
-	EventPlanReplanning   EventType = "plan_replanning"
-	EventPlanCompleted    EventType = "plan_completed"
-	EventPlanFailed       EventType = "plan_failed"
-	EventPlanTimeout      EventType = "plan_timeout"
+	EventTokenUsage         EventType = "token_usage"
+	EventMemoryCompaction   EventType = "memory_compaction"
+	EventMemoryFact         EventType = "memory_fact"
+	EventMemoryRetrieval    EventType = "memory_retrieval"
+	EventWorkspaceRetrieval EventType = "workspace_retrieval"
+	EventToolCall           EventType = "tool_call"
+	EventToolResult         EventType = "tool_result"
+	EventResultReview       EventType = "result_review"
+	EventTaskStarted        EventType = "task_started"
+	EventTaskCompleted      EventType = "task_completed"
+	EventTaskFailed         EventType = "task_failed"
+	EventTaskCancelled      EventType = "task_cancelled"
+	EventTaskTimeout        EventType = "task_timeout"
+	EventPlanGenerated      EventType = "plan_generated"
+	EventPlanRevised        EventType = "plan_revised"
+	EventPlanCancelled      EventType = "plan_cancelled"
+	EventPlanReplanning     EventType = "plan_replanning"
+	EventPlanCompleted      EventType = "plan_completed"
+	EventPlanFailed         EventType = "plan_failed"
+	EventPlanTimeout        EventType = "plan_timeout"
 )
 
 type Event struct {
-	Type      EventType
-	TaskID    string
-	Title     string
-	Content   string
-	Retrieval *memory.RetrievalReport
+	Type               EventType
+	TaskID             string
+	Title              string
+	Content            string
+	Retrieval          *memory.RetrievalReport
+	WorkspaceRetrieval *rag.RetrievalReport
 }
 
 type Observer func(Event)

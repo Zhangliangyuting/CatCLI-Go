@@ -373,6 +373,14 @@ SearchResultFormatter.Format()
 llm.SystemMessage(...)
 ```
 
+Agent 会优先调用可选的 `BuildWithReport()`，将检索报告转换为 `EventWorkspaceRetrieval`，由控制台 Observer 输出：
+
+```text
+[agent] 🔎 workspace retrieve matches=20 included=8 duration=1.2s
+```
+
+`matches` 是本次检索返回的候选片段数（受检索数量上限限制），`included` 是按 token 预算实际纳入的片段数。首次后台索引尚未就绪时会显示 `skipped=index_not_ready`；检索错误会显示 `error`。debug 模式将片段分为“已纳入上下文”和“未纳入上下文”，按编号显示路径、行号、符号或标题及评分，不打印完整 ID 和源码。多 Agent 子任务的日志使用对应任务 ID。
+
 这就是 RAG 的上下文增强（Augmentation）步骤，之后由聊天模型根据参考资料生成回答。
 
 ## 第八部分：看 Agent 怎么使用 RAG
@@ -453,7 +461,11 @@ SQLiteStore
 + ContextProvider
 ```
 
-然后把 `ContextProvider` 注入 ReAct 和 Multi-Agent。当前在启动时调用 `Index()` 同步索引，每次提问时再检索；不会在每次提问时重新索引文件。
+然后将包装后的参考上下文提供器注入 ReAct 和 Multi-Agent。启动时在后台调用 `Index()`，不等待索引完成就进入交互；每次提问时再检索，不会重新扫描文件。
+
+- 已有索引的模型和切块版本兼容时，后台更新期间仍可检索旧索引。
+- 首次索引或模型、切块版本变化时，完成索引前暂不提供 RAG 参考消息，Agent 仍可正常处理请求。
+- 后台索引失败会打印错误，退出时取消并等待索引任务结束，再关闭数据库。
 
 ## 最适合的实际学习路线
 
@@ -501,4 +513,16 @@ main.go
 → LLM
 ```
 
-只要先把这条线看明白，整个 RAG 系统就已经理解了大约 80%。
+只要先把这条线看明白，就能建立对整个 RAG 系统的整体认识。
+
+## 真实服务端到端测试
+
+在仓库根目录运行：
+
+```bash
+CATCLI_TEST_LIVE_RAG=1 go test ./internal/agent -run '^TestLiveWorkspaceRAG$' -v -count=1 -timeout 4m
+```
+
+测试读取与 CLI 相同的 `config/config.yaml`、`.env` 和环境变量，需要配置聊天模型及 embedding 服务。它会产生实际 API 请求和相应费用；普通 `go test` 默认跳过此测试。
+
+测试在临时工作区生成带随机答案的 Go 文件，调用真实 embedding 服务建立索引，再通过 `ContextProvider` 向真实聊天模型提供检索结果。最后检查回答是否包含准确的随机答案和来源文件名。Agent 不配置文件工具，因此答案只能来自参考上下文；不会索引或发送实际项目源码。

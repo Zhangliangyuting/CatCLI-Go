@@ -3,6 +3,7 @@ package main
 import (
 	"AgentCLI/internal/agent"
 	"AgentCLI/internal/memory"
+	"AgentCLI/internal/rag"
 	"fmt"
 	"io"
 	"strings"
@@ -40,6 +41,34 @@ func (observer *consoleObserver) observe(event agent.Event) {
 		}
 	case agent.EventMemoryFact:
 		fmt.Fprintf(observer.output, "%s 🧠 memory fact %s: %s\n", prefix, event.Title, event.Content)
+	case agent.EventWorkspaceRetrieval:
+		if event.WorkspaceRetrieval == nil {
+			return
+		}
+		report := event.WorkspaceRetrieval
+		fmt.Fprintf(observer.output, "%s 🔎 workspace retrieve matches=%d included=%d duration=%s",
+			prefix, len(report.Matches), len(report.Included), report.Duration)
+		if report.SkippedReason != "" {
+			fmt.Fprintf(observer.output, " skipped=%s", report.SkippedReason)
+		}
+		if report.Error != "" {
+			fmt.Fprintf(observer.output, " error=%q", report.Error)
+		}
+		fmt.Fprintln(observer.output)
+		if observer.debug {
+			included := make(map[string]bool, len(report.Included))
+			for _, result := range report.Included {
+				included[result.ID] = true
+			}
+			observer.workspaceChunks(prefix, "RAG 已纳入上下文", report.Included)
+			var excluded []rag.SearchResult
+			for _, result := range report.Matches {
+				if !included[result.ID] {
+					excluded = append(excluded, result)
+				}
+			}
+			observer.workspaceChunks(prefix, "RAG 未纳入上下文", excluded)
+		}
 	case agent.EventMemoryRetrieval:
 		if event.Retrieval == nil {
 			return
@@ -99,5 +128,27 @@ func (observer *consoleObserver) observe(event agent.Event) {
 		fmt.Fprintf(observer.output, "\n%s ❌ %s\n%s\n", planPrefix, event.Title, event.Content)
 	case agent.EventPlanTimeout:
 		fmt.Fprintf(observer.output, "\n%s ⏱️ %s\n%s\n", planPrefix, event.Title, event.Content)
+	}
+}
+
+func (observer *consoleObserver) workspaceChunks(prefix, title string, results []rag.SearchResult) {
+	if len(results) == 0 {
+		return
+	}
+	fmt.Fprintf(observer.output, "%s   %s（%d 个 Chunk）：\n", prefix, title, len(results))
+	for index, result := range results {
+		location := result.Path
+		if result.StartLine > 0 {
+			location += fmt.Sprintf(":%d-%d", result.StartLine, result.EndLine)
+		}
+		label := result.Symbol
+		if label == "" {
+			label = result.Heading
+		}
+		if label == "" {
+			label = result.Kind
+		}
+		fmt.Fprintf(observer.output, "%s     %02d. %s | %s | BM25=%.2f cosine=%.3f RRF=%.4f\n",
+			prefix, index+1, location, label, result.LexicalScore, result.SemanticScore, result.Score)
 	}
 }

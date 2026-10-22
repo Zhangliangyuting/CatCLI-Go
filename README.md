@@ -386,6 +386,10 @@ The `builtin` provider currently exposes these tools:
 
 For a guided tour of workspace indexing, hybrid retrieval, and Agent integration, see the [RAG learning guide (中文)](docs/learning/rag-learning-guide.md).
 
+Workspace indexing runs in the background at startup. A compatible existing index remains searchable during updates; when creating or rebuilding an index, the agent accepts requests without workspace references until indexing succeeds. Indexing errors are reported without stopping chat, and shutdown cancels indexing before closing the database.
+
+Workspace retrieval emits `workspace retrieve` events with match counts, included counts, and duration, including skipped or failed retrievals. Debug output lists included and excluded chunks separately, with numbered source locations, symbols or headings, and scores. Full chunk IDs and source text are omitted from console output.
+
 If you want to study how the agent is built, a good progression is:
 
 1. Understand the `Agent` interface in `internal/agent/agent.go`.
