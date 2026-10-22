@@ -67,6 +67,8 @@ type IndexReport struct {
 	SkippedFiles   int
 	DeletedFiles   int
 	Chunks         int
+	EmbeddedChunks int
+	ReusedChunks   int
 	RebuiltIndex   bool
 }
 
@@ -179,7 +181,14 @@ func (indexer *WorkspaceIndexer) Index(ctx context.Context) (IndexReport, error)
 		if err != nil {
 			return report, fmt.Errorf("chunk workspace file %q: %w", file.Path, err)
 		}
-		embedded, dimensions, err := indexer.embedChunks(ctx, chunks, embeddingDimensions)
+		var previous []EmbeddedChunk
+		if _, exists := storedByPath[file.Path]; exists {
+			previous, err = indexer.store.LoadFileChunks(ctx, file.Path)
+			if err != nil {
+				return report, fmt.Errorf("load previous chunks for %q: %w", file.Path, err)
+			}
+		}
+		embedded, dimensions, reused, err := indexer.embedChunks(ctx, chunks, embeddingDimensions, previous)
 		if err != nil {
 			return report, fmt.Errorf("embed workspace file %q: %w", file.Path, err)
 		}
@@ -194,6 +203,8 @@ func (indexer *WorkspaceIndexer) Index(ctx context.Context) (IndexReport, error)
 		}
 		report.IndexedFiles++
 		report.Chunks += len(embedded)
+		report.ReusedChunks += reused
+		report.EmbeddedChunks += len(embedded) - reused
 	}
 
 	for _, stored := range storedFiles {
@@ -289,46 +300,67 @@ func (indexer *WorkspaceIndexer) embedChunks(
 	ctx context.Context,
 	chunks []Chunk,
 	expectedDimension int,
-) ([]EmbeddedChunk, int, error) {
+	previous []EmbeddedChunk,
+) ([]EmbeddedChunk, int, int, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, expectedDimension, 0, err
+	}
 	if len(chunks) == 0 {
-		return nil, expectedDimension, nil
+		return nil, expectedDimension, 0, nil
 	}
 	embedded := make([]EmbeddedChunk, len(chunks))
 	dimension := expectedDimension
-	for start := 0; start < len(chunks); start += indexer.config.EmbeddingBatchSize {
-		end := min(start+indexer.config.EmbeddingBatchSize, len(chunks))
+	// Previous chunks are from this file and the currently compatible index.
+	// Reuse by content rather than ID: ordinal and source lines may have moved.
+	cached := make(map[string][]float32, len(previous))
+	for _, chunk := range previous {
+		if dimension > 0 && len(chunk.Embedding) == dimension &&
+			chunk.ContentHash == hashText([]byte(chunk.Content)) {
+			cached[chunk.ContentHash] = chunk.Embedding
+		}
+	}
+	reused := 0
+	pending := make([]int, 0, len(chunks))
+	for ordinal, chunk := range chunks {
+		contentHash := hashText([]byte(chunk.Content))
+		embedded[ordinal] = EmbeddedChunk{
+			Chunk: chunk, ID: chunkID(chunk.Path, ordinal, contentHash),
+			Ordinal: ordinal, ContentHash: contentHash,
+		}
+		if vector, exists := cached[contentHash]; exists {
+			embedded[ordinal].Embedding = vector
+			reused++
+		} else {
+			pending = append(pending, ordinal)
+		}
+	}
+	for start := 0; start < len(pending); start += indexer.config.EmbeddingBatchSize {
+		end := min(start+indexer.config.EmbeddingBatchSize, len(pending))
 		texts := make([]string, end-start)
 		for index := start; index < end; index++ {
-			texts[index-start] = chunks[index].Content
+			texts[index-start] = chunks[pending[index]].Content
 		}
 		vectors, err := indexer.embedder.EmbedBatch(ctx, texts)
 		if err != nil {
-			return nil, dimension, err
+			return nil, dimension, reused, err
 		}
 		if len(vectors) != len(texts) {
-			return nil, dimension, fmt.Errorf("embedding batch returned %d vectors for %d chunks", len(vectors), len(texts))
+			return nil, dimension, reused, fmt.Errorf("embedding batch returned %d vectors for %d chunks", len(vectors), len(texts))
 		}
 		for offset, vector := range vectors {
+			ordinal := pending[start+offset]
 			if len(vector) == 0 {
-				return nil, dimension, fmt.Errorf("embedding for chunk %d is empty", start+offset)
+				return nil, dimension, reused, fmt.Errorf("embedding for chunk %d is empty", ordinal)
 			}
 			if dimension == 0 {
 				dimension = len(vector)
 			} else if len(vector) != dimension {
-				return nil, dimension, fmt.Errorf("embedding for chunk %d has dimension %d, want %d", start+offset, len(vector), dimension)
+				return nil, dimension, reused, fmt.Errorf("embedding for chunk %d has dimension %d, want %d", ordinal, len(vector), dimension)
 			}
-			chunk := chunks[start+offset]
-			contentHash := hashText([]byte(chunk.Content))
-			embedded[start+offset] = EmbeddedChunk{
-				Chunk:       chunk,
-				ID:          chunkID(chunk.Path, start+offset, contentHash),
-				Ordinal:     start + offset,
-				ContentHash: contentHash,
-				Embedding:   vector,
-			}
+			embedded[ordinal].Embedding = vector
 		}
 	}
-	return embedded, dimension, nil
+	return embedded, dimension, reused, nil
 }
 
 func ignoreIndexFile(name string) bool {

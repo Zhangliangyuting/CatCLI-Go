@@ -354,8 +354,9 @@ func buildWorkspaceRAG(
 			return
 		}
 		runtime.ready.Store(true)
-		fmt.Printf("\nWorkspace RAG ready: indexed=%d unchanged=%d deleted=%d chunks=%d rebuilt=%t\n",
-			report.IndexedFiles, report.UnchangedFiles, report.DeletedFiles, report.Chunks, report.RebuiltIndex)
+		fmt.Printf("\nWorkspace RAG ready: indexed=%d unchanged=%d deleted=%d chunks=%d embedded=%d reused=%d rebuilt=%t\n",
+			report.IndexedFiles, report.UnchangedFiles, report.DeletedFiles, report.Chunks,
+			report.EmbeddedChunks, report.ReusedChunks, report.RebuiltIndex)
 	}()
 	return runtime, runtime, nil
 }

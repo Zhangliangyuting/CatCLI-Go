@@ -147,6 +147,40 @@ func TestSQLiteStoreReplacesAndDeletesFileChunks(t *testing.T) {
 	}
 }
 
+func TestSQLiteStoreLoadsChunksForOneFile(t *testing.T) {
+	store, err := NewSQLiteStore(filepath.Join(t.TempDir(), "rag.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	ctx := context.Background()
+	wanted := []EmbeddedChunk{
+		embeddedChunk("first", "notes.md", 0, "first", "hash-first"),
+		embeddedChunk("second", "notes.md", 1, "second", "hash-second"),
+	}
+	if err := store.ReplaceFile(ctx, IndexedFile{Path: "notes.md", ContentHash: "notes-hash"}, []EmbeddedChunk{wanted[1], wanted[0]}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.ReplaceFile(ctx, IndexedFile{Path: "other.md", ContentHash: "other-hash"}, []EmbeddedChunk{
+		embeddedChunk("other", "other.md", 0, "other", "hash-other"),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	got, err := store.LoadFileChunks(ctx, "notes.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(got, wanted) {
+		t.Fatalf("LoadFileChunks() = %+v, want %+v", got, wanted)
+	}
+	if got, err := store.LoadFileChunks(ctx, "missing.md"); err != nil || len(got) != 0 {
+		t.Fatalf("missing file = %+v, %v", got, err)
+	}
+	if _, err := store.LoadFileChunks(ctx, ""); err == nil {
+		t.Fatal("empty path must be rejected")
+	}
+}
+
 func TestSQLiteStoreReplaceFileRollsBackOnChunkConflict(t *testing.T) {
 	store, err := NewSQLiteStore(filepath.Join(t.TempDir(), "rag.db"))
 	if err != nil {

@@ -390,6 +390,8 @@ For a guided tour of workspace indexing, hybrid retrieval, and Agent integration
 
 Workspace indexing runs in the background at startup. A compatible existing index remains searchable during updates; when creating or rebuilding an index, the agent accepts requests without workspace references until indexing succeeds. Indexing errors are reported without stopping chat, and shutdown cancels indexing before closing the database.
 
+Unchanged files are skipped by file hash. Changed files are chunked again, but chunks with identical content hashes and valid matching vector dimensions reuse that file's stored embeddings. Only new or changed chunks are sent to the embedding service, while locations and chunk IDs are refreshed. The completion log reports newly embedded and reused chunk counts as `embedded` and `reused`.
+
 Workspace retrieval emits `workspace retrieve` events with match counts, included counts, and duration, including skipped or failed retrievals. Debug output lists included and excluded chunks separately, with numbered source locations, symbols or headings, and scores. Full chunk IDs and source text are omitted from console output.
 
 Debug retrieval output also breaks down database loading, lexical scoring, the query embedding request, local ranking, and formatting time to help locate slow stages.

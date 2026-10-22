@@ -330,15 +330,31 @@ func (store *SQLiteStore) DeleteFile(ctx context.Context, path string) error {
 }
 
 func (store *SQLiteStore) LoadChunks(ctx context.Context) ([]EmbeddedChunk, error) {
+	return store.loadChunks(ctx, "")
+}
+
+func (store *SQLiteStore) LoadFileChunks(ctx context.Context, path string) ([]EmbeddedChunk, error) {
+	if strings.TrimSpace(path) == "" {
+		return nil, fmt.Errorf("indexed file path is empty")
+	}
+	return store.loadChunks(ctx, path)
+}
+
+func (store *SQLiteStore) loadChunks(ctx context.Context, path string) ([]EmbeddedChunk, error) {
 	if err := store.ready(); err != nil {
 		return nil, err
 	}
-	rows, err := store.db.QueryContext(ctx, `
+	query := `
 SELECT id, path, ordinal, language, kind, symbol, heading,
        start_line, end_line, content, content_hash, embedding
-FROM rag_chunks
-ORDER BY path, ordinal
-`)
+FROM rag_chunks`
+	var arguments []any
+	if path != "" {
+		query += " WHERE path = ?"
+		arguments = append(arguments, path)
+	}
+	query += " ORDER BY path, ordinal"
+	rows, err := store.db.QueryContext(ctx, query, arguments...)
 	if err != nil {
 		return nil, fmt.Errorf("load RAG chunks: %w", err)
 	}

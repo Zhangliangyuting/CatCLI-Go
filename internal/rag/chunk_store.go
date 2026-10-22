@@ -42,6 +42,7 @@ type ChunkStore interface {
 	SetEmbeddingDimensions(ctx context.Context, dimensions int) error
 	FileHash(ctx context.Context, path string) (hash string, exists bool, err error)
 	ListFiles(ctx context.Context) ([]IndexedFile, error)
+	LoadFileChunks(ctx context.Context, path string) ([]EmbeddedChunk, error)
 	ReplaceFile(ctx context.Context, file IndexedFile, chunks []EmbeddedChunk) error
 	DeleteFile(ctx context.Context, path string) error
 	Close() error

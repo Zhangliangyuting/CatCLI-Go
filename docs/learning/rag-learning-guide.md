@@ -188,7 +188,11 @@ func (indexer *WorkspaceIndexer) Index(
   ↓
 文件有变化 → Chunker 分块
   ↓
-EmbedBatch 生成向量
+LoadFileChunks 读取该文件的旧片段
+  ↓
+按片段内容 Hash 匹配
+  ├── 内容未变、向量维度一致 → 复用旧向量
+  └── 新增或变化 → EmbedBatch 生成向量
   ↓
 ReplaceFile 写入 SQLite
   ↓
@@ -204,6 +208,16 @@ readFile()
 embedChunks()
 ```
 
+这是两级增量：文件内容哈希不变时跳过整个文件；文件变化时重新切块，但只为内容变化或缺少有效旧向量的片段调用 embedding。复用范围是同一文件，不跨文件查找。片段的路径、行号、序号和 ID 使用本次切块结果重新生成，因此只移动代码位置或删除声明通常不需要重新向量化。新增或修改的声明会重新向量化；切块产生重叠时，受影响的相邻块也可能需要重算。
+
+旧向量只有在内容哈希校验通过且维度与当前索引一致时才复用。模型或切块版本变化仍按现有逻辑重建索引；新向量生成失败时不会替换该文件的旧记录。
+
+完成日志中的 `chunks` 是本次更新文件的片段总数，`embedded` 是新生成向量的片段数，`reused` 是复用向量的片段数，不包含整文件跳过的片段：
+
+```text
+Workspace RAG ready: indexed=1 unchanged=122 deleted=0 chunks=4 embedded=2 reused=2 rebuilt=false
+```
+
 再看它的测试：
 
 - [workspace_indexer_test.go](../../internal/rag/workspace_indexer_test.go)
@@ -213,6 +227,7 @@ embedChunks()
 - 第一次如何创建索引
 - 第二次如何跳过未修改文件
 - 文件修改后如何重新索引
+- 插入函数、移动行号或删除声明时如何复用旧向量
 - 文件删除后如何清理索引
 - Embedding 模型变化后为什么重建
 - Chunker 配置变化后为什么重建

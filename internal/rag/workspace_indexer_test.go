@@ -14,6 +14,7 @@ import (
 
 type recordingEmbedder struct {
 	batches []int
+	texts   []string
 	err     error
 }
 
@@ -30,6 +31,7 @@ func (embedder *recordingEmbedder) EmbedBatch(_ context.Context, texts []string)
 		return nil, embedder.err
 	}
 	embedder.batches = append(embedder.batches, len(texts))
+	embedder.texts = append(embedder.texts, texts...)
 	vectors := make([][]float32, len(texts))
 	for index, text := range texts {
 		vectors[index] = []float32{float32(len(text)), float32(index + 1)}
@@ -178,7 +180,7 @@ func TestWorkspaceIndexerBatchesEmbeddings(t *testing.T) {
 	for index := range chunks {
 		chunks[index] = Chunk{Path: "notes.txt", Kind: "paragraph", Content: "chunk " + string(rune('a'+index))}
 	}
-	embedded, dimensions, err := indexer.embedChunks(context.Background(), chunks, 0)
+	embedded, dimensions, reused, err := indexer.embedChunks(context.Background(), chunks, 0, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -188,6 +190,9 @@ func TestWorkspaceIndexerBatchesEmbeddings(t *testing.T) {
 	if dimensions != 2 {
 		t.Fatalf("embedding dimensions = %d, want 2", dimensions)
 	}
+	if reused != 0 {
+		t.Fatalf("reused = %d, want 0", reused)
+	}
 	seen := make(map[string]bool, len(embedded))
 	for ordinal, chunk := range embedded {
 		if chunk.Ordinal != ordinal || chunk.ID == "" || seen[chunk.ID] {
@@ -195,6 +200,118 @@ func TestWorkspaceIndexerBatchesEmbeddings(t *testing.T) {
 		}
 		seen[chunk.ID] = true
 	}
+}
+
+func TestWorkspaceIndexerReusesUnchangedChunksWithUpdatedLocations(t *testing.T) {
+	root := t.TempDir()
+	writeIndexFile(t, root, "main.go", "package sample\n\nfunc Stable() {}\n\nfunc Changed() { println(1) }\n")
+	work, err := workspace.New(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store, err := NewSQLiteStore(filepath.Join(work.MetadataDir(), "rag.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	embedder := &recordingEmbedder{}
+	indexer, err := NewWorkspaceIndexer(work, NewDefaultChunkerSet(ChunkConfig{}), embedder, store,
+		WorkspaceIndexerConfig{EmbeddingModel: "test-model", EmbeddingBatchSize: 2})
+	if err != nil {
+		t.Fatal(err)
+	}
+	first, err := indexer.Index(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.EmbeddedChunks != 3 || first.ReusedChunks != 0 {
+		t.Fatalf("initial report = %+v", first)
+	}
+	oldChunks, err := store.LoadFileChunks(context.Background(), "main.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldStable := assertEmbeddedSymbol(t, oldChunks, "Stable")
+	embedder.batches, embedder.texts = nil, nil
+	// Stable's text is unchanged, but insertion moves both its ordinal and line.
+	writeIndexFile(t, root, "main.go", "package sample\n\nfunc Added() {}\n\nfunc Stable() {}\n\nfunc Changed() { println(2) }\n")
+	updated, err := indexer.Index(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if updated.Chunks != 4 || updated.ReusedChunks != 2 || updated.EmbeddedChunks != 2 || !reflect.DeepEqual(embedder.batches, []int{2}) {
+		t.Fatalf("update report=%+v batches=%v", updated, embedder.batches)
+	}
+	if !reflect.DeepEqual(embedder.texts, []string{"func Added() {}", "func Changed() { println(2) }"}) {
+		t.Fatalf("only new and changed chunks should be embedded: %q", embedder.texts)
+	}
+	newChunks, err := store.LoadFileChunks(context.Background(), "main.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	stable := assertEmbeddedSymbol(t, newChunks, "Stable")
+	if !reflect.DeepEqual(stable.Embedding, oldStable.Embedding) || stable.Ordinal != 2 || stable.StartLine != 5 || stable.EndLine != 5 || stable.ID == oldStable.ID {
+		t.Fatalf("reused vector must retain new metadata: old=%+v new=%+v", oldStable, stable)
+	}
+	if chunksContain(newChunks, "println(1)") {
+		t.Fatal("old changed chunk remains")
+	}
+	// Deleting a declaration and moving lines needs no new vectors at all.
+	embedder.batches, embedder.texts = nil, nil
+	writeIndexFile(t, root, "main.go", "package sample\n\n\n\nfunc Stable() {}\n\nfunc Changed() { println(2) }\n")
+	deleted, err := indexer.Index(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if deleted.Chunks != 3 || deleted.ReusedChunks != 3 || deleted.EmbeddedChunks != 0 || len(embedder.batches) != 0 {
+		t.Fatalf("delete/line-only report=%+v batches=%v", deleted, embedder.batches)
+	}
+	remaining, err := store.LoadFileChunks(context.Background(), "main.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if chunksContain(remaining, "Added") {
+		t.Fatal("deleted declaration remains in index")
+	}
+}
+
+func TestWorkspaceIndexerDoesNotReuseInvalidCachedVectors(t *testing.T) {
+	chunk := Chunk{Path: "notes.txt", Content: "stable text"}
+	for _, test := range []struct {
+		name      string
+		hash      string
+		vector    []float32
+		dimension int
+	}{
+		{"wrong dimensions", hashText([]byte(chunk.Content)), []float32{1, 2, 3}, 2},
+		{"wrong content hash", "invalid", []float32{1, 2}, 2},
+		{"empty vector", hashText([]byte(chunk.Content)), nil, 2},
+		{"unknown dimensions", hashText([]byte(chunk.Content)), []float32{1, 2, 3}, 0},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			embedder := &recordingEmbedder{}
+			indexer := &WorkspaceIndexer{embedder: embedder, config: WorkspaceIndexerConfig{}.normalized()}
+			chunks, dimensions, reused, err := indexer.embedChunks(context.Background(), []Chunk{chunk}, test.dimension,
+				[]EmbeddedChunk{{Chunk: chunk, ContentHash: test.hash, Embedding: test.vector}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if reused != 0 || dimensions != 2 || len(chunks) != 1 || len(embedder.texts) != 1 {
+				t.Fatalf("invalid cached vector reused: chunks=%+v dimension=%d reused=%d", chunks, dimensions, reused)
+			}
+		})
+	}
+}
+
+func assertEmbeddedSymbol(t *testing.T, chunks []EmbeddedChunk, symbol string) EmbeddedChunk {
+	t.Helper()
+	for _, chunk := range chunks {
+		if chunk.Symbol == symbol {
+			return chunk
+		}
+	}
+	t.Fatalf("missing symbol %q", symbol)
+	return EmbeddedChunk{}
 }
 
 func TestWorkspaceIndexerRebuildsWhenEmbeddingModelChanges(t *testing.T) {
@@ -227,7 +344,7 @@ func TestWorkspaceIndexerRebuildsWhenEmbeddingModelChanges(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !report.RebuiltIndex || report.IndexedFiles != 1 || len(secondEmbedder.batches) == 0 {
+	if !report.RebuiltIndex || report.IndexedFiles != 1 || len(secondEmbedder.batches) == 0 || report.ReusedChunks != 0 || report.EmbeddedChunks != report.Chunks {
 		t.Fatalf("model-change report = %#v, batches = %v", report, secondEmbedder.batches)
 	}
 	metadata, exists, err := store.LoadIndexMetadata(context.Background())
