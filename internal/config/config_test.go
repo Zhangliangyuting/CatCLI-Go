@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -31,6 +32,27 @@ func TestAgentTimeoutConfiguration(t *testing.T) {
 	}
 	if cfg.Agent.PlanTimeout != 15*time.Minute {
 		t.Fatalf("PlanTimeout = %s, want 15m", cfg.Agent.PlanTimeout)
+	}
+}
+
+func TestMCPConfigPathSetting(t *testing.T) {
+	cfg := defaultConfig()
+	if cfg.MCP.ConfigFile != "" {
+		t.Fatal("MCP should be disabled by default")
+	}
+	v := viper.New()
+	setDefaults(v, cfg)
+	v.SetEnvPrefix("CATCLI")
+	v.SetEnvKeyReplacer(strings.NewReplacer(".", "_"))
+	t.Setenv("CATCLI_MCP_CONFIG_FILE", "config/mcp.json")
+	if err := v.BindEnv("mcp.config_file"); err != nil {
+		t.Fatal(err)
+	}
+	if err := v.Unmarshal(&cfg); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.MCP.ConfigFile != "config/mcp.json" {
+		t.Fatalf("path=%q", cfg.MCP.ConfigFile)
 	}
 }
 

@@ -1,0 +1,56 @@
+{
+  "mcpServers": {
+    "filesystem": {
+      "transport": "stdio",
+      "command": "npx",
+      "args": [
+        "-y",
+        "@modelcontextprotocol/server-filesystem@2.1.0",
+        "."
+      ],
+      "cwd": "..",
+      "timeout": "120s",
+      "tools": [
+        "list_directory",
+        "read_text_file",
+        "edit_file",
+        "write_file",
+        "create_directory"
+      ],
+      "disabled": true
+    },
+    "shell": {
+      "transport": "stdio",
+      "command": "uvx",
+      "args": [
+        "mcp-shell-server==1.1.14"
+      ],
+      "cwd": "..",
+      "env": {
+        "ALLOW_COMMANDS": "pwd,ls",
+        "ALLOWED_COMMANDS": "pwd,ls",
+        "ALLOW_PATTERNS": "",
+        "MCP_SHELL_DEFAULT_TIMEOUT_SECONDS": "10",
+        "MCP_SHELL_MAX_TIMEOUT_SECONDS": "30",
+        "MCP_SHELL_OUTPUT_LIMIT_BYTES": "262144"
+      },
+      "timeout": "120s",
+      "tools": [
+        "shell_execute"
+      ],
+      "disabled": true
+    },
+    "remote": {
+      "disabled": true,
+      "transport": "streamable_http",
+      "url": "http://localhost:8000/mcp",
+      "headers": {
+        "Authorization": "Bearer ${MCP_TOKEN}"
+      },
+      "timeout": "30s",
+      "tools": [
+        "search"
+      ]
+    }
+  }
+}

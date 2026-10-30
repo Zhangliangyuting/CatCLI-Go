@@ -6,6 +6,7 @@ import (
 	"AgentCLI/internal/cli"
 	"AgentCLI/internal/config"
 	"AgentCLI/internal/llm"
+	"AgentCLI/internal/mcp"
 	"AgentCLI/internal/memory"
 	"AgentCLI/internal/rag"
 	"AgentCLI/internal/routing"
@@ -71,6 +72,36 @@ func main() {
 	if err := toolRegistry.RegisterEnabledTools(providers, cfg.Tools.Enabled); err != nil {
 		fmt.Println("tool register error:", err)
 		return
+	}
+
+	// MCP tools are discovered once before either Agent starts using the registry.
+	if path := strings.TrimSpace(cfg.MCP.ConfigFile); path != "" {
+		if !filepath.IsAbs(path) {
+			path = filepath.Join(currentWorkspace.Root(), path)
+		}
+		mcpConfig, err := mcp.LoadConfig(path)
+		if err != nil {
+			fmt.Println("MCP config error:", err)
+			return
+		}
+		manager := mcp.NewServerManager(mcpConfig, os.Stderr, nil)
+		defer manager.Close()
+		startupCtx, stopStartup := signal.NotifyContext(context.Background(), os.Interrupt)
+		fmt.Println("MCP: connecting configured servers...")
+		statuses := manager.Start(startupCtx)
+		cancelled := startupCtx.Err() != nil
+		stopStartup()
+		if cancelled {
+			return
+		}
+		for _, status := range statuses {
+			if status.Err != nil {
+				fmt.Printf("MCP %s: unavailable (%v)\n", status.Name, status.Err)
+			} else {
+				fmt.Printf("MCP %s: ready, tools=%d\n", status.Name, status.Tools)
+			}
+		}
+		toolRegistry.RegisterProvider(manager)
 	}
 
 	// Hybrid retrieval uses the configured embeddings model when available.
@@ -149,7 +180,7 @@ func main() {
 	}
 	reviewerSubAgent, err := multiagent.NewReviewerSubAgent(
 		client,
-		toolRegistry.Subset("list_dir", "read_file"),
+		selectReviewerTools(toolRegistry),
 	)
 	if err != nil {
 		fmt.Println("reviewer SubAgent error:", err)

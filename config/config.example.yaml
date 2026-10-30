@@ -1,5 +1,12 @@
 debug: false
 
+# Optional MCP server configuration; relative paths use the workspace root.
+# Also configurable with CATCLI_MCP_CONFIG_FILE.
+# Copy config/mcp.example.json to config/mcp.json and enable the desired servers.
+# Then set config_file: config/mcp.json.
+mcp:
+  config_file: ""
+
 openai_compatible:
   api_key: your-api-key
   base_url: https://api.deepseek.com

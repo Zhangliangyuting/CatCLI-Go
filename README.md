@@ -16,6 +16,7 @@ This project is intentionally minimal. It is a first step from zero to a working
 - Concurrent in-memory storage with typed entries and token-budget selection
 - Scheduler resource conflict detection and per-file read/write locks
 - Config-driven provider and tool registration
+- MCP client with stdio and Streamable HTTP transports, parallel server startup, and namespaced external tools
 - Built-in file and command tools with safety checks
 - Interactive CLI with conversation history
 
@@ -390,6 +391,8 @@ For a guided tour of workspace indexing, hybrid retrieval, and Agent integration
 
 [![Codebase RAG 架构图](docs/architecture/codebase-RAG.jpg)](docs/architecture/codebase-RAG.jpg)
 
+For MCP configuration, protocol support, and source reading, see the [MCP learning guide (中文)](docs/learning/mcp-learning-guide.md). To enable external tools, copy `config/mcp.example.json` to `config/mcp.json`, configure and enable a server, then run `CATCLI_MCP_CONFIG_FILE=config/mcp.json go run ./cmd/catcli`. MCP is disabled when no configuration path is set.
+
 Workspace indexing runs in the background at startup. A compatible existing index remains searchable during updates; when creating or rebuilding an index, the agent accepts requests without workspace references until indexing succeeds. Indexing errors are reported without stopping chat, and shutdown cancels indexing before closing the database.
 
 Unchanged files are skipped by file hash. Changed files are chunked again, but chunks with identical content hashes and valid matching vector dimensions reuse that file's stored embeddings. Only new or changed chunks are sent to the embedding service, while locations and chunk IDs are refreshed. The completion log reports newly embedded and reused chunk counts as `embedded` and `reused`.
@@ -425,6 +428,7 @@ internal/cli/               Reusable CLI-specific implementations
 internal/config/            Viper-based config loading
 internal/llm/               OpenAI-compatible chat client
 internal/memory/            Typed memory entries, token counting, and in-memory management
+internal/mcp/               MCP config, transports, JSON-RPC client, server management, tool adapter
 internal/plan/              Plan and task state, dependency ordering, visualization
 internal/routing/           Hybrid ReAct/Plan mode selection
 internal/tool/              Tool definitions, handlers, providers, registry

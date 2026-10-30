@@ -20,6 +20,11 @@ type Config struct {
 	Agent            AgentConfig            `mapstructure:"agent"`
 	Providers        ProvidersConfig        `mapstructure:"providers"`
 	Tools            ToolsConfig            `mapstructure:"tools"`
+	MCP              MCPConfig              `mapstructure:"mcp"`
+}
+
+type MCPConfig struct {
+	ConfigFile string `mapstructure:"config_file"`
 }
 
 type OpenAICompatibleConfig struct {
@@ -107,7 +112,7 @@ func Load() (Config, error) {
 		return Config{}, err
 	}
 
-	for _, key := range []string{"embedding.model", "embedding.base_url", "embedding.api_key"} {
+	for _, key := range []string{"embedding.model", "embedding.base_url", "embedding.api_key", "mcp.config_file"} {
 		if err := v.BindEnv(key); err != nil {
 			return Config{}, err
 		}
@@ -173,6 +178,7 @@ func defaultConfig() Config {
 }
 
 func setDefaults(v *viper.Viper, cfg Config) {
+	v.SetDefault("mcp.config_file", cfg.MCP.ConfigFile)
 	v.SetDefault("debug", cfg.Debug)
 	v.SetDefault("openai_compatible.base_url", cfg.OpenAICompatible.BaseURL)
 	v.SetDefault("openai_compatible.model", cfg.OpenAICompatible.Model)
