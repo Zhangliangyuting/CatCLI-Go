@@ -388,6 +388,8 @@ The `builtin` provider currently exposes these tools:
 
 For a guided tour of workspace indexing, hybrid retrieval, and Agent integration, see the [RAG learning guide (中文)](docs/learning/rag-learning-guide.md).
 
+[![Codebase RAG 架构图](docs/architecture/codebase-RAG.jpg)](docs/architecture/codebase-RAG.jpg)
+
 Workspace indexing runs in the background at startup. A compatible existing index remains searchable during updates; when creating or rebuilding an index, the agent accepts requests without workspace references until indexing succeeds. Indexing errors are reported without stopping chat, and shutdown cancels indexing before closing the database.
 
 Unchanged files are skipped by file hash. Changed files are chunked again, but chunks with identical content hashes and valid matching vector dimensions reuse that file's stored embeddings. Only new or changed chunks are sent to the embedding service, while locations and chunk IDs are refreshed. The completion log reports newly embedded and reused chunk counts as `embedded` and `reused`.
