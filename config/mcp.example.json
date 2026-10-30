@@ -51,6 +51,38 @@
       "tools": [
         "search"
       ]
+    },
+    "brave": {
+      "transport": "stdio",
+      "command": "npx",
+      "args": [
+        "-y",
+        "@brave/brave-search-mcp-server@2.1.4",
+        "--transport",
+        "stdio"
+      ],
+      "cwd": "..",
+      "env": {
+        "BRAVE_API_KEY": "${BRAVE_API_KEY}"
+      },
+      "timeout": "120s",
+      "tools": [
+        "brave_web_search"
+      ],
+      "disabled": true
+    },
+    "fetch": {
+      "transport": "stdio",
+      "command": "uvx",
+      "args": [
+        "mcp-server-fetch==2026.10.28"
+      ],
+      "cwd": "..",
+      "timeout": "120s",
+      "tools": [
+        "fetch"
+      ],
+      "disabled": true
     }
   }
 }

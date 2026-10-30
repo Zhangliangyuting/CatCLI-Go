@@ -44,7 +44,7 @@ main.go
 
 1. 复制 `config/mcp.example.json` 为 `config/mcp.json`。
 2. 修改需要连接的 Server，删除它的 `disabled: true` 或设置为 `false`。
-3. 示例已提供固定版本的 Filesystem 和 Shell Server；HTTP 示例需要填写真实 endpoint。`tools` 填写该 Server 实际提供的工具名称。
+3. 示例已提供固定版本的 Filesystem、Shell、Brave Search 和 Fetch Server；HTTP 示例需要填写真实 endpoint。`tools` 填写该 Server 实际提供的工具名称。
 4. 启动：
 
 ```bash
@@ -80,6 +80,15 @@ mcp:
 注册后名称为 `mcp__filesystem__read_text_file`、`mcp__shell__shell_execute` 等。内置工具继续保留，MCP 配置不会替换它们。参数要遵循外部 Server 的 schema，例如 Filesystem 写文件使用 `path`，编辑使用 `edits: [{oldText, newText}]`；其 `write_file` 会覆盖已有文件，没有内置工具的 `overwrite` 开关。
 
 初次启动 `npx` / `uvx` 会下载固定版本包，后续复用本地缓存。示例为冷启动保留了 `120s` 超时；该值也适用于单次 RPC，Shell 内部另外将命令执行时间限制为默认 10 秒、最多 30 秒。
+
+### 网页搜索与读取
+
+- [Brave Search MCP](https://github.com/brave/brave-search-mcp-server)：固定版本 `@brave/brave-search-mcp-server@2.1.4`，白名单仅暴露 `brave_web_search`，注册为 `mcp__brave__brave_web_search`。需要 [Brave Search API Key](https://brave.com/search/api/)。
+- [Fetch MCP](https://github.com/modelcontextprotocol/servers/tree/main/src/fetch)：固定版本 `mcp-server-fetch==2026.10.28`，白名单仅暴露 `fetch`，注册为 `mcp__fetch__fetch`，不需要 API Key。读取 URL 并把 HTML 转换为 Markdown；可用 `max_length` 限制返回长度、`start_index` 分段继续读取。
+
+在本地 `.env` 添加 `BRAVE_API_KEY=你的密钥`，然后在 `config/mcp.json` 中将 `brave.disabled` 改为 `false`。Fetch 可以独立启用，将 `fetch.disabled` 设为 `false` 或省略该字段即可。修改后重启 CatCLI；不要把真实密钥写入示例配置。
+
+典型调用：`brave_web_search({"query":"Go context cancellation"})` 搜索链接，再用 `fetch({"url":"https://example.com","max_length":3000})` 读取选中网页正文。两者复用现有 ToolRegistry 和工具调用 Observer，Reviewer 的只读文件工具白名单不变。
 
 `tools` 省略时暴露 Server 的全部工具，`[]` 表示不暴露工具；填写数组则仅注册指定的原始工具名，找不到指定工具时该 Server 启动失败。`tools.enabled` 仍只控制原有 Provider 的工具。外部 MCP 工具的权限由对应 Server 决定，不受内置文件工具的 Workspace 路径校验约束。
 
