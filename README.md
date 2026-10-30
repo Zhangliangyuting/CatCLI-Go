@@ -393,6 +393,8 @@ For a guided tour of workspace indexing, hybrid retrieval, and Agent integration
 
 For MCP configuration, protocol support, and source reading, see the [MCP learning guide (中文)](docs/learning/mcp-learning-guide.md). To enable external tools, copy `config/mcp.example.json` to `config/mcp.json`, configure and enable a server, then run `CATCLI_MCP_CONFIG_FILE=config/mcp.json go run ./cmd/catcli`. MCP is disabled when no configuration path is set.
 
+[![MCP 架构图](docs/architecture/MCP.jpg)](docs/architecture/MCP.jpg)
+
 Workspace indexing runs in the background at startup. A compatible existing index remains searchable during updates; when creating or rebuilding an index, the agent accepts requests without workspace references until indexing succeeds. Indexing errors are reported without stopping chat, and shutdown cancels indexing before closing the database.
 
 Unchanged files are skipped by file hash. Changed files are chunked again, but chunks with identical content hashes and valid matching vector dimensions reuse that file's stored embeddings. Only new or changed chunks are sent to the embedding service, while locations and chunk IDs are refreshed. The completion log reports newly embedded and reused chunk counts as `embedded` and `reused`.
