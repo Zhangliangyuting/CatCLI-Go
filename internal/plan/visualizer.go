@@ -80,6 +80,8 @@ func taskStatusIcon(status TaskStatus) string {
 		return "[ ]"
 	case RUNNING:
 		return "[▶]"
+	case AWAITING_REVIEW:
+		return "[审]"
 	case COMPLETED:
 		return "[✓]"
 	case FAILED:

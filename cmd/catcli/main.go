@@ -5,6 +5,7 @@ import (
 	"AgentCLI/internal/agent/multiagent"
 	"AgentCLI/internal/cli"
 	"AgentCLI/internal/config"
+	"AgentCLI/internal/execution"
 	"AgentCLI/internal/llm"
 	"AgentCLI/internal/mcp"
 	"AgentCLI/internal/memory"
@@ -20,7 +21,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"strings"
-	"sync/atomic"
+	"time"
 )
 
 func main() {
@@ -119,7 +120,7 @@ func main() {
 			APIKey: apiKey, BaseURL: baseURL, Model: model, HTTPClient: client.HTTPClient,
 		}
 	}
-	referenceProvider, ragRuntime, err := buildWorkspaceRAG(
+	ragContext, ragRuntime, err := buildWorkspaceRAG(
 		context.Background(), currentWorkspace, embedder, cfg,
 	)
 	if err != nil {
@@ -144,6 +145,19 @@ func main() {
 		return
 	}
 	rootMemory := memoryRuntime.RootContext()
+	executionStore, executionRuns, err := loadExecutionLog(currentWorkspace.MetadataDir(), rootMemory.ConversationID)
+	if err != nil {
+		fmt.Println("execution log error:", err)
+		return
+	}
+	executionRecorder := execution.NewRecorder(executionStore, rootMemory.ConversationID)
+	defer func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := executionStore.SaveCheckpoint(ctx, rootMemory.ConversationID); err != nil {
+			fmt.Println("execution checkpoint error:", err)
+		}
+	}()
 	agentInstance := agent.NewReActAgent(
 		client,
 		toolRegistry,
@@ -152,7 +166,8 @@ func main() {
 		agent.WithCompactionScheduler(rootMemory.Scheduler),
 		agent.WithRequestTokenEstimator(rootMemory.Estimator),
 		agent.WithTranscript(rootMemory.Transcript, rootMemory.ConversationID),
-		agent.WithReferenceContextProvider(referenceProvider),
+		agent.WithRecorder(executionRecorder),
+		agent.WithRAGContext(ragContext),
 	)
 	factExtractor, err := memory.NewLLMFactExtractor(client)
 	if err != nil {
@@ -198,7 +213,8 @@ func main() {
 		cfg.Agent.MaxWorkers,
 		cfg.Agent.TaskTimeout,
 		cfg.Agent.PlanTimeout,
-		multiagent.WithReferenceContextProvider(referenceProvider),
+		multiagent.WithRAGContext(ragContext),
+		multiagent.WithRecorder(executionRecorder),
 	)
 	if err != nil {
 		fmt.Println("plan-and-execute SubAgent error:", err)
@@ -220,6 +236,16 @@ func main() {
 	} else {
 		fmt.Printf("New conversation: %s\n", rootMemory.ConversationID)
 		fmt.Printf("Resume with CATCLI_CONVERSATION_ID=%s\n", rootMemory.ConversationID)
+	}
+	if err := promptInterruptedRun(context.Background(), executionStore, rootMemory.ConversationID, executionRuns, reader, os.Stdout,
+		func(_ context.Context, run execution.RunState) (string, error) {
+			answer, runErr := runWithInterrupt(func(ctx context.Context) (string, error) {
+				return resumeExecution(agent.WithObserver(ctx, eventObserver), run, agentInstance.Resume, planAgent.Resume)
+			})
+			return answer, errors.Join(runErr, memoryRuntime.Save())
+		}); err != nil {
+		fmt.Println("resume error:", err)
+		return
 	}
 	fmt.Println("AgentCLI started. Type exit to quit.")
 
@@ -284,25 +310,9 @@ func main() {
 // workspaceRAG keeps indexing independent of requests. Incompatible or missing
 // indexes stay hidden until a complete indexing pass succeeds.
 type workspaceRAG struct {
-	provider *rag.ContextProvider
-	store    *rag.SQLiteStore
-	ready    atomic.Bool
-	cancel   context.CancelFunc
-	done     chan struct{}
-}
-
-func (runtime *workspaceRAG) Build(ctx context.Context, query string) ([]llm.Message, error) {
-	return runtime.BuildWithReport(ctx, query, nil)
-}
-
-func (runtime *workspaceRAG) BuildWithReport(ctx context.Context, query string, onReport func(rag.RetrievalReport)) ([]llm.Message, error) {
-	if !runtime.ready.Load() {
-		if onReport != nil {
-			onReport(rag.RetrievalReport{SkippedReason: "index_not_ready"})
-		}
-		return nil, nil
-	}
-	return runtime.provider.BuildWithReport(ctx, query, onReport)
+	store  *rag.SQLiteStore
+	cancel context.CancelFunc
+	done   chan struct{}
 }
 
 func (runtime *workspaceRAG) Close() error {
@@ -316,7 +326,7 @@ func buildWorkspaceRAG(
 	work *workspacepkg.Workspace,
 	embedder llm.Embedder,
 	cfg config.Config,
-) (agent.ReferenceContextProvider, *workspaceRAG, error) {
+) (*rag.ContextProvider, *workspaceRAG, error) {
 	if !cfg.RAG.Enabled || embedder == nil {
 		return nil, nil, nil
 	}
@@ -324,7 +334,7 @@ func buildWorkspaceRAG(
 	if err != nil {
 		return nil, nil, err
 	}
-	closeOnError := func(err error) (agent.ReferenceContextProvider, *workspaceRAG, error) {
+	closeOnError := func(err error) (*rag.ContextProvider, *workspaceRAG, error) {
 		_ = store.Close()
 		return nil, nil, err
 	}
@@ -370,11 +380,11 @@ func buildWorkspaceRAG(
 	}
 	indexCtx, cancel := context.WithCancel(ctx)
 	runtime := &workspaceRAG{
-		provider: provider, store: store, cancel: cancel, done: make(chan struct{}),
+		store: store, cancel: cancel, done: make(chan struct{}),
 	}
-	runtime.ready.Store(exists && metadata.EmbeddingModel == strings.TrimSpace(cfg.Embedding.Model) &&
+	provider.SetIndexReady(exists && metadata.EmbeddingModel == strings.TrimSpace(cfg.Embedding.Model) &&
 		metadata.ChunkerVersion == chunkers.Version())
-	fmt.Printf("Workspace RAG: indexing in background (existing index available=%t)\n", runtime.ready.Load())
+	fmt.Printf("Workspace RAG: indexing in background (existing index available=%t)\n", provider.IndexReady())
 	go func() {
 		defer close(runtime.done)
 		report, err := indexer.Index(indexCtx)
@@ -384,12 +394,12 @@ func buildWorkspaceRAG(
 			}
 			return
 		}
-		runtime.ready.Store(true)
+		provider.SetIndexReady(true)
 		fmt.Printf("\nWorkspace RAG ready: indexed=%d unchanged=%d deleted=%d chunks=%d embedded=%d reused=%d rebuilt=%t\n",
 			report.IndexedFiles, report.UnchangedFiles, report.DeletedFiles, report.Chunks,
 			report.EmbeddedChunks, report.ReusedChunks, report.RebuiltIndex)
 	}()
-	return runtime, runtime, nil
+	return provider, runtime, nil
 }
 
 func runRoutedInput(

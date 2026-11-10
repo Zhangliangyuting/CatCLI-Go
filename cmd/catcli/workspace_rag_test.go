@@ -102,7 +102,7 @@ func TestWorkspaceRAGIndexesWithoutBlockingRequests(t *testing.T) {
 				t.Fatal("startup waited for embedding instead of returning immediately")
 			}
 			var progress rag.RetrievalReport
-			messages, err := runtime.BuildWithReport(ctx, "WorkspaceAnswer", func(report rag.RetrievalReport) {
+			messages, err := provider.BuildWithReport(ctx, "WorkspaceAnswer", func(report rag.RetrievalReport) {
 				progress = report
 			})
 			if err != nil {

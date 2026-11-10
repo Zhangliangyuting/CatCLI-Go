@@ -238,6 +238,8 @@ func (p *Plan) Goal() string {
 	return p.goal
 }
 
+func (p *Plan) ID() string { return p.id }
+
 func (p *Plan) ExecutionOrder() []string {
 	return p.executionOrder
 }

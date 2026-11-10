@@ -1,17 +1,20 @@
 package agent
 
 import (
+	"AgentCLI/internal/execution"
 	"AgentCLI/internal/llm"
 	"AgentCLI/internal/memory"
 	"AgentCLI/internal/rag"
 	"AgentCLI/internal/tool"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 )
 
 type ReActAgent struct {
+	recorder            *execution.Recorder
 	llmClient           *llm.OpenAICompatibleClient
 	tools               *tool.ToolRegistry
 	memoryManager       *memory.Manager
@@ -22,7 +25,7 @@ type ReActAgent struct {
 	transcript          memory.TranscriptStore
 	conversationID      string
 	systemMessage       llm.Message
-	referenceProvider   ReferenceContextProvider
+	ragContext          *rag.ContextProvider
 	referenceMessages   []llm.Message
 }
 
@@ -71,9 +74,9 @@ func WithSystemPrompt(prompt string) ReActAgentOption {
 	}
 }
 
-func WithReferenceContextProvider(provider ReferenceContextProvider) ReActAgentOption {
+func WithRAGContext(provider *rag.ContextProvider) ReActAgentOption {
 	return func(agent *ReActAgent) {
-		agent.referenceProvider = provider
+		agent.ragContext = provider
 	}
 }
 
@@ -87,6 +90,11 @@ func WithTranscript(store memory.TranscriptStore, conversationID string) ReActAg
 			agent.conversationID = conversationID
 		}
 	}
+}
+
+// WithRecorder enables execution recording through the shared execution module.
+func WithRecorder(recorder *execution.Recorder) ReActAgentOption {
+	return func(a *ReActAgent) { a.recorder = recorder }
 }
 
 func NewReActAgent(
@@ -112,12 +120,39 @@ func NewReActAgent(
 	return agent
 }
 
-func (a *ReActAgent) Run(
+func (a *ReActAgent) Run(ctx context.Context, userInput string) (answer string, runErr error) {
+	input, sourceID := userInput, ""
+	if resume, ok := ctx.Value(resumeContextKey{}).(resumeRequest); ok {
+		input, sourceID = resume.originalInput, resume.sourceID
+	}
+	run, err := a.recorder.StartRun(ctx, input, sourceID, execution.ReActRun)
+	if err != nil {
+		return "", err
+	}
+	returned := false
+	defer func() {
+		// A panic leaves the Run open; only a returned execution gets an end event.
+		if returned {
+			if finishErr := run.FinishRun(ctx, answer, runErr); finishErr != nil && !errors.Is(runErr, finishErr) {
+				runErr = errors.Join(runErr, finishErr)
+			}
+		}
+	}()
+	answer, runErr = a.run(ctx, userInput, run)
+	returned = true
+	return answer, runErr
+}
+
+func (a *ReActAgent) run(
 	ctx context.Context,
 	userInput string,
+	recorder *execution.RunRecorder,
 ) (string, error) {
 	a.currentQuery = userInput
-	referenceMessages, err := buildReferenceContext(ctx, a.referenceProvider, userInput)
+	if resume, ok := ctx.Value(resumeContextKey{}).(resumeRequest); ok {
+		a.currentQuery = resume.originalInput
+	}
+	referenceMessages, err := buildReferenceContext(ctx, a.ragContext, a.currentQuery)
 	if err != nil {
 		return "", err
 	}
@@ -182,30 +217,25 @@ func (a *ReActAgent) Run(
 				Content: toolCall.Function.Arguments,
 			})
 
-			var args map[string]interface{}
-			if err := json.Unmarshal([]byte(toolCall.Function.Arguments), &args); err != nil {
-				toolResult := "ERROR: invalid tool arguments: " + err.Error()
-				Emit(ctx, Event{
-					Type:    EventToolResult,
-					Title:   toolCall.Function.Name,
-					Content: toolResult,
-				})
-				if _, storeErr := a.storeMessage(
-					llm.ToolMessage(toolCall.ID, toolResult),
-					toolCall.Function.Name,
-				); storeErr != nil {
-					return "", fmt.Errorf("store tool result: %w", storeErr)
-				}
-				continue
-			}
-
-			toolResult, err := a.tools.Execute(
-				ctx,
-				toolCall.Function.Name,
-				args,
-			)
+			call, err := recorder.StartToolCall(ctx, execution.ToolCallEventData{
+				ToolCallID: toolCall.ID, ToolName: toolCall.Function.Name, Arguments: toolCall.Function.Arguments,
+			})
 			if err != nil {
-				toolResult = "ERROR: " + err.Error()
+				return "", err
+			}
+			var args map[string]any
+			var toolResult string
+			var toolErr error
+			if err := json.Unmarshal([]byte(call.Arguments), &args); err != nil {
+				toolErr = fmt.Errorf("invalid tool arguments: %w", err)
+			} else {
+				toolResult, toolErr = a.tools.Execute(ctx, call.ToolName, args)
+			}
+			if toolErr != nil {
+				toolResult = "ERROR: " + toolErr.Error()
+			}
+			if err := recorder.CompleteToolCall(ctx, call.CallID, toolResult, toolErr); err != nil {
+				return "", err
 			}
 
 			Emit(ctx, Event{
@@ -265,21 +295,15 @@ func (a *ReActAgent) ClearHistory() {
 
 func buildReferenceContext(
 	ctx context.Context,
-	provider ReferenceContextProvider,
+	provider *rag.ContextProvider,
 	query string,
 ) ([]llm.Message, error) {
 	if provider == nil {
 		return nil, nil
 	}
-	var messages []llm.Message
-	var err error
-	if reporter, ok := provider.(ReportingReferenceContextProvider); ok {
-		messages, err = reporter.BuildWithReport(ctx, query, func(report rag.RetrievalReport) {
-			Emit(ctx, Event{Type: EventWorkspaceRetrieval, WorkspaceRetrieval: &report})
-		})
-	} else {
-		messages, err = provider.Build(ctx, query)
-	}
+	messages, err := provider.BuildWithReport(ctx, query, func(report rag.RetrievalReport) {
+		Emit(ctx, Event{Type: EventWorkspaceRetrieval, WorkspaceRetrieval: &report})
+	})
 	if err != nil {
 		return nil, fmt.Errorf("build reference context: %w", err)
 	}

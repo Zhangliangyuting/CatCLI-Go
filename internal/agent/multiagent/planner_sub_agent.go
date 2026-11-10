@@ -110,19 +110,9 @@ func (agent *PlannerSubAgent) Replan(
 }
 
 type rawPlan struct {
-	Goal    string    `json:"goal"`
-	Summary string    `json:"summary"`
-	Tasks   []rawTask `json:"tasks"`
-}
-
-type rawTask struct {
-	ID             string        `json:"id"`
-	Name           string        `json:"name"`
-	Description    string        `json:"description"`
-	Type           plan.TaskType `json:"type"`
-	Dependencies   []string      `json:"dependencies"`
-	ReadResources  []string      `json:"read_resources"`
-	WriteResources []string      `json:"write_resources"`
+	Goal    string                `json:"goal"`
+	Summary string                `json:"summary"`
+	Tasks   []plan.TaskDefinition `json:"tasks"`
 }
 
 func parsePlan(planJSON string) (*plan.Plan, error) {

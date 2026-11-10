@@ -127,7 +127,10 @@ func (agent *SubAgent) RunMessages(
 				Content: toolCall.Function.Arguments,
 			})
 
-			toolResult := agent.executeTool(ctx, toolCall)
+			toolResult, err := agent.executeTool(ctx, toolCall)
+			if err != nil {
+				return "", err
+			}
 			baseagent.Emit(ctx, baseagent.Event{
 				Type:    baseagent.EventToolResult,
 				Title:   rolePrefix + toolCall.Function.Name,
@@ -138,14 +141,23 @@ func (agent *SubAgent) RunMessages(
 	}
 }
 
-func (agent *SubAgent) executeTool(ctx context.Context, call llm.ToolCall) string {
-	var args map[string]interface{}
-	if err := json.Unmarshal([]byte(call.Function.Arguments), &args); err != nil {
-		return "ERROR: invalid tool arguments: " + err.Error()
-	}
-	result, err := agent.tools.Execute(ctx, call.Function.Name, args)
+func (agent *SubAgent) executeTool(ctx context.Context, call llm.ToolCall) (string, error) {
+	data, result, err := startToolCallRecording(ctx, call)
 	if err != nil {
-		return "ERROR: " + err.Error()
+		return "", err
 	}
-	return result
+	var args map[string]any
+	var toolErr error
+	if err := json.Unmarshal([]byte(data.Arguments), &args); err != nil {
+		toolErr = fmt.Errorf("invalid tool arguments: %w", err)
+	} else if data.ReusedFrom == "" {
+		result, toolErr = agent.tools.Execute(ctx, data.ToolName, args)
+	}
+	if toolErr != nil {
+		result = "ERROR: " + toolErr.Error()
+	}
+	if err := completeToolCallRecording(ctx, data.CallID, result, toolErr); err != nil {
+		return "", err
+	}
+	return result, nil
 }

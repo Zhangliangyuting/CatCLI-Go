@@ -387,6 +387,8 @@ The `builtin` provider currently exposes these tools:
 
 ## Learning Path
 
+For ReAct execution logging, state replay, and the startup continue/abandon prompt, see the [execution replay guide (中文)](docs/learning/execution-replay-guide.md). Continuing starts a linked model-guided recovery run after user confirmation; tools are never automatically replayed.
+
 For a guided tour of workspace indexing, hybrid retrieval, and Agent integration, see the [RAG learning guide (中文)](docs/learning/rag-learning-guide.md).
 
 [![Codebase RAG 架构图](docs/architecture/codebase-RAG.jpg)](docs/architecture/codebase-RAG.jpg)

@@ -4,6 +4,7 @@ import (
 	baseagent "AgentCLI/internal/agent"
 	"AgentCLI/internal/llm"
 	"AgentCLI/internal/plan"
+	"AgentCLI/internal/rag"
 	"AgentCLI/internal/tool"
 	"context"
 	"encoding/json"
@@ -19,7 +20,7 @@ const ReviewerSystemPrompt = `你是独立的任务结果检查者。请根据�
 // ReviewerSubAgent is both a SubAgent and a typed result reviewer.
 type ReviewerSubAgent struct {
 	*SubAgent
-	referenceProvider baseagent.ReferenceContextProvider
+	ragContext *rag.ContextProvider
 }
 
 var _ baseagent.Agent = (*ReviewerSubAgent)(nil)
@@ -29,9 +30,9 @@ type ResultReview struct {
 	Feedback string `json:"feedback"`
 }
 
-func (agent *ReviewerSubAgent) ConfigureReferenceContext(provider baseagent.ReferenceContextProvider) {
+func (agent *ReviewerSubAgent) ConfigureRAGContext(provider *rag.ContextProvider) {
 	if agent != nil {
-		agent.referenceProvider = provider
+		agent.ragContext = provider
 	}
 }
 
@@ -85,7 +86,7 @@ func (agent *ReviewerSubAgent) ReviewResult(
 		return ResultReview{}, fmt.Errorf("encode result review input: %w", err)
 	}
 
-	referenceMessages, err := buildReferenceContext(ctx, agent.referenceProvider, execution.Prompt)
+	referenceMessages, err := buildReferenceContext(ctx, agent.ragContext, execution.Prompt)
 	if err != nil {
 		return ResultReview{}, err
 	}

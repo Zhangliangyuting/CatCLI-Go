@@ -2,30 +2,42 @@ package multiagent
 
 import (
 	baseagent "AgentCLI/internal/agent"
-	"AgentCLI/internal/llm"
+	"AgentCLI/internal/memory"
 	"AgentCLI/internal/plan"
 	"AgentCLI/internal/rag"
 	"context"
-	"errors"
+	"path/filepath"
 	"testing"
 )
 
-type reportingReferenceProvider struct{}
-
-func (reportingReferenceProvider) Build(context.Context, string) ([]llm.Message, error) {
-	return nil, errors.New("must use BuildWithReport")
-}
-
-func (reportingReferenceProvider) BuildWithReport(_ context.Context, _ string, onReport func(rag.RetrievalReport)) ([]llm.Message, error) {
-	onReport(rag.RetrievalReport{Matches: []rag.SearchResult{{ID: "chunk-1"}}})
-	return []llm.Message{llm.SystemMessage("reference")}, nil
-}
-
 func TestReferenceContextEmitsWorkspaceEventWithTaskID(t *testing.T) {
+	store, err := rag.NewSQLiteStore(filepath.Join(t.TempDir(), "rag.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	if err := store.ResetIndex(t.Context(), rag.IndexMetadata{EmbeddingModel: "test", EmbeddingDimensions: 2, ChunkerVersion: "test"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.ReplaceFile(t.Context(), rag.IndexedFile{Path: "evidence.go", ContentHash: "hash"}, []rag.EmbeddedChunk{{ID: "chunk-1", ContentHash: "chunk-hash", Chunk: rag.Chunk{Path: "evidence.go", Content: "query evidence", Symbol: "query"}, Embedding: []float32{1, 0}}}); err != nil {
+		t.Fatal(err)
+	}
+	retriever, err := rag.NewRetriever(store, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	formatter, err := rag.NewSearchResultFormatter(memory.ApproxTokenCounter{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	provider, err := rag.NewContextProvider(retriever, formatter, 2048, 5)
+	if err != nil {
+		t.Fatal(err)
+	}
 	var events []baseagent.Event
 	ctx := baseagent.WithObserver(context.Background(), func(event baseagent.Event) { events = append(events, event) })
 	ctx = baseagent.WithEventTaskID(ctx, "task-1")
-	messages, err := buildReferenceContext(ctx, reportingReferenceProvider{}, "query")
+	messages, err := buildReferenceContext(ctx, provider, "query")
 	if err != nil {
 		t.Fatal(err)
 	}

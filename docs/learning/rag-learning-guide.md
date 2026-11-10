@@ -416,18 +416,13 @@ debug 模式还会在片段清单前显示分阶段耗时：
 
 ## 第八部分：看 Agent 怎么使用 RAG
 
-先看公共接口：
-
-- [agent.go](../../internal/agent/agent.go)
+Agent 直接持有 RAG 的上下文构建对象，不再定义额外的 Provider 接口：
 
 ```go
-type ReferenceContextProvider interface {
-    Build(
-        ctx context.Context,
-        query string,
-    ) ([]llm.Message, error)
-}
+ragContext *rag.ContextProvider
 ```
+
+它只负责按查询构建参考消息，索引与 SQLite 生命周期仍由启动流程管理。`ContextProvider.BuildWithReport()` 返回消息，同时通过回调向 Observer 报告检索详情；Agent 无需判断是否实现另一个报告接口。后台索引通过 `SetIndexReady()` 控制索引是否可供检索。
 
 然后看 ReAct：
 
@@ -436,7 +431,7 @@ type ReferenceContextProvider interface {
 重点找：
 
 ```go
-WithReferenceContextProvider()
+WithRAGContext()
 buildReferenceContext()
 contextMessagesFor()
 ```

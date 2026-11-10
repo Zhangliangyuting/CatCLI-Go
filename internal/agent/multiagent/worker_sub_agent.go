@@ -4,6 +4,7 @@ import (
 	baseagent "AgentCLI/internal/agent"
 	"AgentCLI/internal/llm"
 	"AgentCLI/internal/memory"
+	"AgentCLI/internal/rag"
 	"AgentCLI/internal/tool"
 	"context"
 	"encoding/json"
@@ -22,12 +23,12 @@ type WorkerSubAgent struct {
 	requestEstimator    memory.RequestTokenEstimator
 	transcript          memory.TranscriptStore
 	conversationID      string
-	referenceProvider   baseagent.ReferenceContextProvider
+	ragContext          *rag.ContextProvider
 }
 
-func (agent *WorkerSubAgent) ConfigureReferenceContext(provider baseagent.ReferenceContextProvider) {
+func (agent *WorkerSubAgent) ConfigureRAGContext(provider *rag.ContextProvider) {
 	if agent != nil {
-		agent.referenceProvider = provider
+		agent.ragContext = provider
 	}
 }
 
@@ -75,7 +76,7 @@ func (agent *WorkerSubAgent) Run(ctx context.Context, input string) (string, err
 	if agent.memoryManager == nil {
 		return agent.SubAgent.Run(ctx, input)
 	}
-	referenceMessages, err := buildReferenceContext(ctx, agent.referenceProvider, input)
+	referenceMessages, err := buildReferenceContext(ctx, agent.ragContext, input)
 	if err != nil {
 		return "", err
 	}
@@ -124,7 +125,10 @@ func (agent *WorkerSubAgent) Run(ctx context.Context, input string) (string, err
 		}
 		for _, call := range result.Message.ToolCalls {
 			baseagent.Emit(ctx, baseagent.Event{Type: baseagent.EventToolCall, Title: "[WORKER] " + call.Function.Name, Content: call.Function.Arguments})
-			toolResult := agent.executeWorkerTool(ctx, call)
+			toolResult, err := agent.executeWorkerTool(ctx, call)
+			if err != nil {
+				return "", err
+			}
 			baseagent.Emit(ctx, baseagent.Event{Type: baseagent.EventToolResult, Title: "[WORKER] " + call.Function.Name, Content: toolResult})
 			if _, err := agent.storeMessage(llm.ToolMessage(call.ID, toolResult), call.Function.Name); err != nil {
 				return "", fmt.Errorf("store worker tool result: %w", err)
@@ -181,14 +185,23 @@ func (agent *WorkerSubAgent) storeMessage(message llm.Message, toolName string) 
 func (agent *WorkerSubAgent) executeWorkerTool(
 	ctx context.Context,
 	call llm.ToolCall,
-) string {
-	var arguments map[string]interface{}
-	if err := json.Unmarshal([]byte(call.Function.Arguments), &arguments); err != nil {
-		return "ERROR: invalid tool arguments: " + err.Error()
-	}
-	result, err := agent.tools.Execute(ctx, call.Function.Name, arguments)
+) (string, error) {
+	data, result, err := startToolCallRecording(ctx, call)
 	if err != nil {
-		return "ERROR: " + err.Error()
+		return "", err
 	}
-	return result
+	var args map[string]any
+	var toolErr error
+	if err := json.Unmarshal([]byte(data.Arguments), &args); err != nil {
+		toolErr = fmt.Errorf("invalid tool arguments: %w", err)
+	} else if data.ReusedFrom == "" {
+		result, toolErr = agent.tools.Execute(ctx, data.ToolName, args)
+	}
+	if toolErr != nil {
+		result = "ERROR: " + toolErr.Error()
+	}
+	if err := completeToolCallRecording(ctx, data.CallID, result, toolErr); err != nil {
+		return "", err
+	}
+	return result, nil
 }

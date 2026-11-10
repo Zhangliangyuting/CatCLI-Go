@@ -2,15 +2,22 @@ package multiagent
 
 import (
 	baseagent "AgentCLI/internal/agent"
+	executionlog "AgentCLI/internal/execution"
 	"AgentCLI/internal/llm"
 	"AgentCLI/internal/memory"
 	"AgentCLI/internal/plan"
+	"AgentCLI/internal/rag"
 	"AgentCLI/internal/tool"
 	"context"
+	"errors"
 	"fmt"
 )
 
 type TaskExecution struct {
+	Recorder        *executionlog.RunRecorder
+	Reference       executionlog.TaskReference
+	ReviewOnly      bool
+	SavedResult     string
 	TaskID          string
 	TaskName        string
 	TaskDescription string
@@ -22,11 +29,11 @@ type TaskExecution struct {
 // TaskExecutor creates a Worker, executes one task, and asks the Reviewer to
 // validate the result. Scheduling and timeouts remain TaskScheduler concerns.
 type TaskExecutor struct {
-	client            *llm.OpenAICompatibleClient
-	tools             *tool.ToolRegistry
-	memoryRuntime     *memory.ConversationRuntime
-	reviewer          *ReviewerSubAgent
-	referenceProvider baseagent.ReferenceContextProvider
+	client        *llm.OpenAICompatibleClient
+	tools         *tool.ToolRegistry
+	memoryRuntime *memory.ConversationRuntime
+	reviewer      *ReviewerSubAgent
+	ragContext    *rag.ContextProvider
 }
 
 func newTaskExecutor(
@@ -34,29 +41,67 @@ func newTaskExecutor(
 	tools *tool.ToolRegistry,
 	memoryRuntime *memory.ConversationRuntime,
 	reviewer *ReviewerSubAgent,
-	referenceProvider baseagent.ReferenceContextProvider,
+	ragContext *rag.ContextProvider,
 ) *TaskExecutor {
 	if reviewer != nil {
-		reviewer.ConfigureReferenceContext(referenceProvider)
+		reviewer.ConfigureRAGContext(ragContext)
 	}
 	return &TaskExecutor{
-		client:            client,
-		tools:             tools,
-		memoryRuntime:     memoryRuntime,
-		reviewer:          reviewer,
-		referenceProvider: referenceProvider,
+		client:        client,
+		tools:         tools,
+		memoryRuntime: memoryRuntime,
+		reviewer:      reviewer,
+		ragContext:    ragContext,
 	}
 }
 
 func (executor *TaskExecutor) Execute(
 	ctx context.Context,
 	execution TaskExecution,
-) (string, error) {
+) (result string, runErr error) {
 	taskCtx := baseagent.WithEventTaskID(ctx, execution.TaskID)
-	result, err := executor.executeWorker(taskCtx, execution)
-	if err != nil || executor.reviewer == nil {
-		return result, err
+	if !execution.ReviewOnly {
+		if err := recordTask(taskCtx, execution.Recorder, executionlog.TaskStarted, execution.Reference, "", nil); err != nil {
+			return "", err
+		}
 	}
+	defer func() {
+		if runErr == nil {
+			return
+		}
+		typ := executionlog.TaskFailed
+		if errors.Is(runErr, context.Canceled) {
+			typ = executionlog.TaskCancelled
+		}
+		if err := recordTask(taskCtx, execution.Recorder, typ, execution.Reference, result, runErr); err != nil {
+			runErr = errors.Join(runErr, err)
+		}
+	}()
+	ref := execution.Reference
+	ref.Phase = "worker"
+	freshTools := map[string]bool{}
+	if executor.reviewer != nil {
+		for _, definition := range executor.reviewer.tools.ToolDefinitions() {
+			freshTools[definition.FunctionDefinition.Name] = true
+		}
+	}
+	taskCtx = context.WithValue(taskCtx, toolRecordingKey{}, taskToolRecording{run: execution.Recorder, ref: ref, freshTools: freshTools})
+	result = execution.SavedResult
+	if !execution.ReviewOnly {
+		var err error
+		result, err = executor.executeWorker(taskCtx, execution)
+		if err != nil {
+			return result, err
+		}
+		if err := recordTask(taskCtx, execution.Recorder, executionlog.TaskWorkCompleted, execution.Reference, result, nil); err != nil {
+			return result, err
+		}
+	}
+	if executor.reviewer == nil {
+		return result, recordTask(taskCtx, execution.Recorder, executionlog.TaskCompleted, execution.Reference, result, nil)
+	}
+	ref.Phase = "reviewer"
+	taskCtx = context.WithValue(taskCtx, toolRecordingKey{}, taskToolRecording{run: execution.Recorder, ref: ref})
 
 	review, err := executor.reviewer.ReviewResult(taskCtx, execution, result)
 	if err != nil {
@@ -80,7 +125,7 @@ func (executor *TaskExecutor) Execute(
 		Title:   "[REVIEWER] 通过",
 		Content: review.Feedback,
 	})
-	return result, nil
+	return result, recordTask(taskCtx, execution.Recorder, executionlog.TaskCompleted, execution.Reference, result, nil)
 }
 
 func (executor *TaskExecutor) executeWorker(
@@ -91,7 +136,11 @@ func (executor *TaskExecutor) executeWorker(
 		return "", fmt.Errorf("task executor is nil")
 	}
 
-	taskAgent, err := executor.newWorker(execution.TaskID)
+	memoryID := execution.TaskID
+	if execution.Recorder != nil {
+		memoryID = fmt.Sprintf("%s-%d-%s-%d", execution.Recorder.ID(), execution.Reference.Revision, execution.TaskID, execution.Reference.Attempt)
+	}
+	taskAgent, err := executor.newWorker(memoryID)
 	if err != nil {
 		return "", fmt.Errorf("create task agent: %w", err)
 	}
@@ -117,6 +166,6 @@ func (executor *TaskExecutor) newWorker(taskID string) (baseagent.Agent, error) 
 	if err := worker.ConfigureMemory(taskRuntime.AgentMemoryContext); err != nil {
 		return nil, err
 	}
-	worker.ConfigureReferenceContext(executor.referenceProvider)
+	worker.ConfigureRAGContext(executor.ragContext)
 	return worker, nil
 }

@@ -2,6 +2,7 @@ package multiagent
 
 import (
 	baseagent "AgentCLI/internal/agent"
+	executionlog "AgentCLI/internal/execution"
 	"AgentCLI/internal/llm"
 	"AgentCLI/internal/memory"
 	"AgentCLI/internal/plan"
@@ -15,6 +16,7 @@ import (
 )
 
 type PlanAndExecuteAgent struct {
+	recorder          *executionlog.Recorder
 	planner           *PlannerSubAgent
 	executor          *TaskExecutor
 	scheduler         *TaskScheduler
@@ -25,15 +27,19 @@ type PlanAndExecuteAgent struct {
 	planTimeout       time.Duration
 	rootMemory        memory.AgentMemoryContext
 	currentQuery      string
-	referenceProvider baseagent.ReferenceContextProvider
+	ragContext        *rag.ContextProvider
 	referenceMessages []llm.Message
 }
 
 type PlanAndExecuteOption func(*PlanAndExecuteAgent)
 
-func WithReferenceContextProvider(provider baseagent.ReferenceContextProvider) PlanAndExecuteOption {
+func WithRecorder(recorder *executionlog.Recorder) PlanAndExecuteOption {
+	return func(a *PlanAndExecuteAgent) { a.recorder = recorder }
+}
+
+func WithRAGContext(provider *rag.ContextProvider) PlanAndExecuteOption {
 	return func(agent *PlanAndExecuteAgent) {
-		agent.referenceProvider = provider
+		agent.ragContext = provider
 	}
 }
 
@@ -81,19 +87,38 @@ func NewPlanAndExecuteAgent(
 			option(agent)
 		}
 	}
-	agent.executor = newTaskExecutor(client, tools, memoryRuntime, reviewer, agent.referenceProvider)
+	agent.executor = newTaskExecutor(client, tools, memoryRuntime, reviewer, agent.ragContext)
 	return agent, nil
 }
 
 func (a *PlanAndExecuteAgent) Run(
 	ctx context.Context,
 	input string,
-) (string, error) {
+) (answer string, runErr error) {
+	run, err := a.recorder.StartRun(ctx, input, "", executionlog.PlanAndExecuteRun)
+	if err != nil {
+		return "", err
+	}
+	returned := false
+	defer func() {
+		if returned {
+			if finishErr := run.FinishRun(ctx, answer, runErr); finishErr != nil && !errors.Is(runErr, finishErr) {
+				runErr = errors.Join(runErr, finishErr)
+			}
+		}
+	}()
+	ctx = context.WithValue(ctx, runRecorderKey{}, run)
+	answer, runErr = a.run(ctx, input)
+	returned = true
+	return answer, runErr
+}
+
+func (a *PlanAndExecuteAgent) run(ctx context.Context, input string) (string, error) {
 	a.currentQuery = input
 	if err := ctx.Err(); err != nil {
 		return "", err
 	}
-	referenceMessages, err := buildReferenceContext(ctx, a.referenceProvider, input)
+	referenceMessages, err := buildReferenceContext(ctx, a.ragContext, input)
 	if err != nil {
 		return "", err
 	}
@@ -203,8 +228,12 @@ func (a *PlanAndExecuteAgent) executeWithReplan(
 	}
 	defer cancel()
 
+	run, _ := ctx.Value(runRecorderKey{}).(*executionlog.RunRecorder)
 	for replanCount := 0; ; replanCount++ {
 		a.currentPlan = p
+		if err := recordPlan(planCtx, run, p, replanCount > 0); err != nil {
+			return allResults.String(), err
+		}
 
 		if replanCount > 0 {
 			baseagent.Emit(ctx, baseagent.Event{
@@ -223,6 +252,10 @@ func (a *PlanAndExecuteAgent) executeWithReplan(
 
 		if executeErr == nil {
 			return allResults.String(), nil
+		}
+		var recordErr *recordingError
+		if errors.As(executeErr, &recordErr) {
+			return allResults.String(), executeErr
 		}
 		if planCtx.Err() != nil {
 			return allResults.String(), planCtx.Err()
@@ -309,21 +342,15 @@ func (a *PlanAndExecuteAgent) planningMessages(
 
 func buildReferenceContext(
 	ctx context.Context,
-	provider baseagent.ReferenceContextProvider,
+	provider *rag.ContextProvider,
 	query string,
 ) ([]llm.Message, error) {
 	if provider == nil {
 		return nil, nil
 	}
-	var messages []llm.Message
-	var err error
-	if reporter, ok := provider.(baseagent.ReportingReferenceContextProvider); ok {
-		messages, err = reporter.BuildWithReport(ctx, query, func(report rag.RetrievalReport) {
-			baseagent.Emit(ctx, baseagent.Event{Type: baseagent.EventWorkspaceRetrieval, WorkspaceRetrieval: &report})
-		})
-	} else {
-		messages, err = provider.Build(ctx, query)
-	}
+	messages, err := provider.BuildWithReport(ctx, query, func(report rag.RetrievalReport) {
+		baseagent.Emit(ctx, baseagent.Event{Type: baseagent.EventWorkspaceRetrieval, WorkspaceRetrieval: &report})
+	})
 	if err != nil {
 		return nil, fmt.Errorf("build plan workspace context: %w", err)
 	}

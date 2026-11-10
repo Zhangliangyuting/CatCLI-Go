@@ -2,6 +2,7 @@ package multiagent
 
 import (
 	baseagent "AgentCLI/internal/agent"
+	executionlog "AgentCLI/internal/execution"
 	"AgentCLI/internal/plan"
 	"context"
 	"errors"
@@ -45,6 +46,18 @@ func (s *TaskScheduler) Execute(
 	p *plan.Plan,
 	executor *TaskExecutor,
 ) (string, error) {
+	run, _ := ctx.Value(runRecorderKey{}).(*executionlog.RunRecorder)
+	var recorded executionlog.RunState
+	if run != nil {
+		var err error
+		recorded, err = run.State()
+		if err != nil {
+			return "", &recordingError{err}
+		}
+		if recorded.Plan == nil {
+			return "", &recordingError{fmt.Errorf("task scheduling requires a recorded plan")}
+		}
+	}
 	executionCtx, cancelExecution := context.WithCancel(ctx)
 	defer cancelExecution()
 	ctxDone := executionCtx.Done()
@@ -77,11 +90,28 @@ func (s *TaskScheduler) Execute(
 			)
 		}
 	}
+	// Restored completed tasks are scheduling inputs, not new jobs. Their
+	// results still feed dependency prompts and the final ordered output.
+	results := make(map[string]string, len(taskIDs))
+	completed := 0
+	for _, taskID := range taskIDs {
+		task := tasks[taskID]
+		remaining[taskID] = 0
+		for _, dep := range task.Dependencies() {
+			if tasks[dep].Status() != plan.COMPLETED {
+				remaining[taskID]++
+			}
+		}
+		if task.Status() == plan.COMPLETED {
+			completed++
+			results[taskID] = task.Result()
+		}
+	}
 
 	// 首批没有依赖的任务。
 	ready := make([]string, 0, len(taskIDs))
 	for _, taskID := range taskIDs {
-		if remaining[taskID] == 0 {
+		if remaining[taskID] == 0 && tasks[taskID].Status() != plan.COMPLETED {
 			ready = append(ready, taskID)
 		}
 	}
@@ -99,10 +129,8 @@ func (s *TaskScheduler) Execute(
 		}()
 	}
 
-	results := make(map[string]string, len(taskIDs))
 	activeResources := newResourceTracker()
 	running := 0
-	completed := 0
 	var executionErr error
 
 	for len(ready) > 0 || running > 0 {
@@ -126,13 +154,18 @@ func (s *TaskScheduler) Execute(
 			ready = append(ready[:readyIndex], ready[readyIndex+1:]...)
 
 			task := tasks[taskID]
+			reviewOnly, savedResult := task.Status() == plan.AWAITING_REVIEW, task.Result()
 			activeResources.acquire(task)
 			task.MarkRunning()
+			title := "[WORKER] " + task.Name()
+			if reviewOnly {
+				title = "[REVIEWER] 恢复审查 " + task.Name()
+			}
 
 			baseagent.Emit(ctx, baseagent.Event{
 				Type:    baseagent.EventTaskStarted,
 				TaskID:  task.ID(),
-				Title:   "[WORKER] " + task.Name(),
+				Title:   title,
 				Content: p.Visualize(),
 			})
 
@@ -140,16 +173,34 @@ func (s *TaskScheduler) Execute(
 			// 此时所有依赖结果都已经完成。
 			prompt := buildTaskPrompt(p, task)
 
-			jobs <- taskJob{
-				execution: TaskExecution{
-					TaskID:          taskID,
-					TaskName:        task.Name(),
-					TaskDescription: task.Description(),
-					TaskType:        task.Type(),
-					PlanGoal:        p.Goal(),
-					Prompt:          prompt,
-				},
+			job := TaskExecution{
+				TaskID:          taskID,
+				TaskName:        task.Name(),
+				TaskDescription: task.Description(),
+				TaskType:        task.Type(),
+				PlanGoal:        p.Goal(),
+				Prompt:          prompt,
+				ReviewOnly:      reviewOnly,
+				SavedResult:     savedResult,
 			}
+			if run != nil {
+				job.Recorder = run
+				job.Reference = executionlog.TaskReference{Revision: recorded.Plan.Revision, TaskID: taskID, Attempt: 1}
+				for _, saved := range recorded.Tasks {
+					if saved.Revision != recorded.Plan.Revision || saved.Definition.ID != taskID {
+						continue
+					}
+					job.Reference.Attempt = saved.Attempt
+					if !reviewOnly {
+						job.Reference.Attempt++
+					}
+					if saved.Attempt > 0 && !reviewOnly {
+						job.Prompt += taskRecoveryContext(recorded.Calls, taskID, recorded.Plan.Revision)
+					}
+					break
+				}
+			}
+			jobs <- taskJob{execution: job}
 			running++
 		}
 

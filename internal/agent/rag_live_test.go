@@ -102,7 +102,7 @@ func TestLiveWorkspaceRAG(t *testing.T) {
 	}
 	t.Log("real query embedding and retrieval verified")
 	// No file tools: the model must obtain the random answer from RAG context.
-	agent := NewReActAgent(client, tool.NewToolRegistry(), WithReferenceContextProvider(provider))
+	agent := NewReActAgent(client, tool.NewToolRegistry(), WithRAGContext(provider))
 	answer, err := agent.Run(ctx, query)
 	if err != nil {
 		t.Fatalf("live chat: %v", err)

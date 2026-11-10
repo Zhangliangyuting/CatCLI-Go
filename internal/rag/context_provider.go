@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"sync/atomic"
 	"time"
 )
 
@@ -21,13 +22,23 @@ type RetrievalReport struct {
 }
 
 // ContextProvider retrieves and formats workspace excerpts for one model
-// request. It satisfies agent.ReferenceContextProvider without depending on
-// the agent package.
+// request. Agents hold this concrete object directly.
 type ContextProvider struct {
-	retriever *Retriever
-	formatter *SearchResultFormatter
-	maxTokens int
-	limit     int
+	retriever        *Retriever
+	formatter        *SearchResultFormatter
+	maxTokens        int
+	limit            int
+	indexUnavailable atomic.Bool
+}
+
+// SetIndexReady is used by background indexing before exposing a new or rebuilt
+// index. New providers default to ready for existing synchronous callers.
+func (provider *ContextProvider) SetIndexReady(ready bool) {
+	provider.indexUnavailable.Store(!ready)
+}
+
+func (provider *ContextProvider) IndexReady() bool {
+	return provider != nil && !provider.indexUnavailable.Load()
 }
 
 func NewContextProvider(
@@ -75,6 +86,10 @@ func (provider *ContextProvider) BuildWithReport(
 	}()
 	if provider == nil || strings.TrimSpace(query) == "" {
 		report.SkippedReason = "empty_provider_or_query"
+		return nil, nil
+	}
+	if !provider.IndexReady() {
+		report.SkippedReason = "index_not_ready"
 		return nil, nil
 	}
 	results, timings, err := provider.retriever.SearchWithTimings(ctx, query, provider.limit)
