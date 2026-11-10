@@ -64,14 +64,15 @@ type TaskReference struct {
 // CallID is our execution identity; ToolCallID is the model's protocol identity.
 // Arguments remains a string so malformed model arguments can also be recorded.
 type ToolCallEventData struct {
-	ReusedFrom string         `json:"reused_from,omitempty"`
-	Task       *TaskReference `json:"task,omitempty"`
-	CallID     string         `json:"call_id"`
-	ToolCallID string         `json:"tool_call_id"`
-	ToolName   string         `json:"tool_name"`
-	Arguments  string         `json:"arguments,omitempty"`
-	Result     string         `json:"result,omitempty"`
-	Error      string         `json:"error,omitempty"`
+	ReusedFrom       string         `json:"reused_from,omitempty"`
+	Task             *TaskReference `json:"task,omitempty"`
+	CallID           string         `json:"call_id"`
+	ToolCallID       string         `json:"tool_call_id"`
+	ToolName         string         `json:"tool_name"`
+	Arguments        string         `json:"arguments,omitempty"`
+	VerificationData string         `json:"verification_data,omitempty"`
+	Result           string         `json:"result,omitempty"`
+	Error            string         `json:"error,omitempty"`
 }
 
 // PlanEventData is a confirmed full plan, not a draft or a patch. Revisions
@@ -98,10 +99,12 @@ const (
 	ConfirmedCompleted   ReconciliationOutcome = "completed"
 	ConfirmedNotExecuted ReconciliationOutcome = "not_executed"
 	StillUnknown         ReconciliationOutcome = "unknown"
+	// AuthorizedRetry preserves uncertainty but permits a fresh attempt.
+	AuthorizedRetry ReconciliationOutcome = "retry_allowed"
 )
 
-// Evidence is supplied by a caller that has checked the external state. This
-// event records a conclusion; it does not itself verify or re-execute anything.
+// Evidence describes an external-state check or the user's decision to allow
+// another attempt despite uncertainty. This event does not execute anything.
 // SourceRunID permits a new recovery Run to reconcile an ancestor's call.
 type ToolCallReconciliation struct {
 	SourceRunID string                `json:"source_run_id"`
@@ -196,7 +199,7 @@ func validateEvent(e Event) error {
 			return fmt.Errorf("reconciliation requires source run, call ID and evidence")
 		}
 		switch r.Outcome {
-		case ConfirmedCompleted, ConfirmedNotExecuted, StillUnknown:
+		case ConfirmedCompleted, ConfirmedNotExecuted, StillUnknown, AuthorizedRetry:
 		default:
 			return fmt.Errorf("invalid reconciliation outcome")
 		}

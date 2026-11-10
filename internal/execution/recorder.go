@@ -130,7 +130,7 @@ func (r *RunRecorder) StartToolCall(ctx context.Context, call ToolCallEventData)
 		return ToolCallEventData{}, err
 	}
 	r.pending[id] = call
-	r.state.Calls = append(r.state.Calls, CallState{OriginRunID: r.runID, ReusedFrom: call.ReusedFrom, CallID: id, ToolCallID: call.ToolCallID, ToolName: call.ToolName, Arguments: call.Arguments, Task: call.Task, Status: Unknown})
+	r.state.Calls = append(r.state.Calls, CallState{OriginRunID: r.runID, ReusedFrom: call.ReusedFrom, CallID: id, ToolCallID: call.ToolCallID, ToolName: call.ToolName, Arguments: call.Arguments, VerificationData: call.VerificationData, Task: call.Task, Status: Unknown})
 	if call.Task != nil {
 		ref := *call.Task
 		call.Task = &ref

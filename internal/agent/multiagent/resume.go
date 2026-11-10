@@ -5,6 +5,7 @@ import (
 	"AgentCLI/internal/llm"
 	"AgentCLI/internal/memory"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 )
@@ -21,12 +22,38 @@ func (a *PlanAndExecuteAgent) Resume(ctx context.Context, selected executionlog.
 	if source.Status != executionlog.Interrupted || (source.Kind != "" && source.Kind != executionlog.PlanAndExecuteRun) || (source.Kind == "" && source.Plan == nil) {
 		return "", fmt.Errorf("run is not an interrupted Plan-and-Execute run")
 	}
-	// Automatic verification is not implemented. Leave uncertain calls and the
-	// original Run unchanged instead of treating a prompt as verified evidence.
+	// The user has chosen to continue. Reuse verified outcomes; unresolved
+	// historical calls permit fresh attempts without claiming they never ran.
+	var verified []executionlog.ToolCallReconciliation
 	for _, call := range source.Calls {
-		if call.Status == executionlog.Unknown {
+		if call.Status != executionlog.Unknown {
+			continue
+		}
+		if source.Plan == nil || a.executor == nil {
 			return "", fmt.Errorf("%w: %s", ErrRecoveryNeedsVerification, call.CallID)
 		}
+		decision := executionlog.ToolCallReconciliation{
+			SourceRunID: source.RunID, CallID: call.CallID,
+			Outcome:  executionlog.AuthorizedRetry,
+			Evidence: "user chose to continue the interrupted task; prior execution remains uncertain; no verified postcondition; allow a fresh attempt without reusing this call",
+		}
+		var args map[string]any
+		if decodeErr := json.Unmarshal([]byte(call.Arguments), &args); decodeErr != nil {
+			decision.Evidence += "; prior arguments are invalid JSON; Worker must reconstruct valid arguments"
+		} else {
+			check, checkErr := a.executor.tools.Verify(ctx, call.ToolName, args, call.VerificationData)
+			if err := ctx.Err(); err != nil {
+				return "", err
+			}
+			if checkErr != nil {
+				decision.Evidence += "; verification failed: " + checkErr.Error()
+			} else if check != nil && check.Retry {
+				decision.Evidence += "; " + check.Evidence
+			} else if check != nil {
+				decision.Outcome, decision.Evidence, decision.Result = executionlog.ConfirmedCompleted, check.Evidence, check.Result
+			}
+		}
+		verified = append(verified, decision)
 	}
 	if err := ctx.Err(); err != nil {
 		return "", err
@@ -55,6 +82,17 @@ func (a *PlanAndExecuteAgent) Resume(ctx context.Context, selected executionlog.
 			}
 		}
 	}()
+	for _, check := range verified {
+		if err := run.ReconcileToolCall(ctx, check); err != nil {
+			return "", err
+		}
+	}
+	if len(verified) > 0 {
+		state, err = run.State()
+		if err != nil {
+			return "", err
+		}
+	}
 	if source.Plan == nil {
 		ctx = context.WithValue(ctx, runRecorderKey{}, run)
 		answer, err = continued.run(ctx, source.Input)

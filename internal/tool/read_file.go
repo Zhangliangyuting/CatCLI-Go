@@ -14,6 +14,14 @@ const maxReadFileBytes int64 = 256 * 1024
 const defaultReadChunkBytes = 16 * 1024
 const maxReadChunkBytes = 64 * 1024
 
+// Read-only calls must run again as new observations, never as historical results.
+func verifyFreshRead(ctx context.Context, _ map[string]any, _ string) (*Verification, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	return &Verification{Retry: true, Evidence: "read-only tool requires a fresh observation; do not reuse or invent the interrupted read result"}, nil
+}
+
 func ReadFileDefinition() Definition {
 	return Definition{
 		Type: "function",

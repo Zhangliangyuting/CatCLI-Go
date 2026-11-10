@@ -1,7 +1,6 @@
 package main
 
 import (
-	"AgentCLI/internal/agent/multiagent"
 	"AgentCLI/internal/execution"
 	"AgentCLI/internal/plan"
 	"bufio"
@@ -263,19 +262,8 @@ func TestExecutionRecoveryAfterSIGKILL(t *testing.T) {
 			}
 			assertCrashEffect(t, root, tc.hasEffect)
 			assertFullCrashReplay(t, store, runs)
-			if tc.call == execution.Unknown {
-				before, _ := store.Load(t.Context(), crashConversation, 0)
-				agent := &multiagent.PlanAndExecuteAgent{}
-				multiagent.WithRecorder(execution.NewRecorder(store, crashConversation))(agent)
-				if _, err := agent.Resume(t.Context(), latest); !errors.Is(err, multiagent.ErrRecoveryNeedsVerification) {
-					t.Fatalf("ambiguous side effect was not gated: %v", err)
-				}
-				after, _ := store.Load(t.Context(), crashConversation, 0)
-				if !reflect.DeepEqual(before, after) {
-					t.Fatal("blocked recovery consumed or rewrote the original Run")
-				}
-				assertCrashEffect(t, root, tc.hasEffect)
-			}
+			// Replay preserves Unknown without executing tools. User-authorized
+			// retry and verified-result reuse are covered by multiagent integration tests.
 			// A fresh process/store can append immediately after recovery; sequence
 			// and committed byte position must survive the killed writer.
 			if _, err := store.Append(t.Context(), execution.Event{

@@ -61,7 +61,7 @@ func (r *RunRecorder) recordWorkflow(ctx context.Context, e Event) error {
 	return nil
 }
 
-// ReconcileToolCall updates an unknown call in this handle's inherited state.
+// ReconcileToolCall records a checked outcome or permission to retry an unknown call.
 // It does not reload history; Resume supplies authoritative state at handoff.
 func (r *RunRecorder) ReconcileToolCall(ctx context.Context, reconciliation ToolCallReconciliation) error {
 	if r == nil {

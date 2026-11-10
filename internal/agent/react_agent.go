@@ -217,8 +217,16 @@ func (a *ReActAgent) run(
 				Content: toolCall.Function.Arguments,
 			})
 
+			var verificationData string
+			if recorder != nil {
+				var args map[string]any
+				if json.Unmarshal([]byte(toolCall.Function.Arguments), &args) == nil {
+					verificationData, _ = a.tools.PrepareVerification(ctx, toolCall.Function.Name, args)
+				}
+			}
 			call, err := recorder.StartToolCall(ctx, execution.ToolCallEventData{
 				ToolCallID: toolCall.ID, ToolName: toolCall.Function.Name, Arguments: toolCall.Function.Arguments,
+				VerificationData: verificationData,
 			})
 			if err != nil {
 				return "", err

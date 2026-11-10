@@ -34,8 +34,8 @@ func ToolName(server, name string) string {
 	return clean + "_" + hex.EncodeToString(digest[:8])
 }
 
-func adaptTool(server string, descriptor ToolDescriptor, client *Client) tool.Tool {
-	return tool.Tool{
+func adaptTool(server string, descriptor ToolDescriptor, client *Client, available map[string]bool) tool.Tool {
+	adapted := tool.Tool{
 		Definition: tool.Definition{Type: "function", FunctionDefinition: tool.FunctionDefinition{
 			Name:        ToolName(server, descriptor.Name),
 			Description: descriptor.Description,
@@ -56,4 +56,15 @@ func adaptTool(server string, descriptor ToolDescriptor, client *Client) tool.To
 			return string(encoded), nil
 		},
 	}
+	if server == "filesystem" && descriptor.Name == "write_file" && available["read_text_file"] {
+		adapted.Verify = func(ctx context.Context, args map[string]any, _ string) (*tool.Verification, error) {
+			return verifyFilesystemWrite(ctx, client, args)
+		}
+	}
+	if server == "filesystem" && descriptor.Name == "create_directory" && available["get_file_info"] {
+		adapted.Verify = func(ctx context.Context, args map[string]any, _ string) (*tool.Verification, error) {
+			return verifyFilesystemDirectory(ctx, client, args)
+		}
+	}
+	return adapted
 }

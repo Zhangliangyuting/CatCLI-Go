@@ -4,7 +4,7 @@
 
 恢复会话历史，只能知道用户、模型和工具交换了什么消息。执行日志记录 ReAct 或 Plan-and-Execute Run 的开始、工具调用与结束，以及确认计划、Worker 返回和 Reviewer 审查进度。
 
-范围包括执行事实记录、状态重建、Checkpoint 与字节偏移增量读取、用户确认后的 ReAct 恢复，以及 Plan-and-Execute 的计划与任务进度恢复。Plan-and-Execute 遇到 Unknown 调用会暂停恢复，暂不提供人工核查回调或自动核查器；相同任务中已确认成功的继承调用可以复用结果。暂不实现无人确认自动续跑、跨进程执行权抢占或上下文压缩的跨文件提交 Checkpoint。恢复不等于精确恢复中断时的程序指令位置，也不保证任意外部副作用只执行一次。
+范围包括执行事实记录、状态重建、Checkpoint 与字节偏移增量读取、用户确认后的 ReAct 恢复，以及 Plan-and-Execute 的计划与任务进度恢复。Plan-and-Execute 对内置 write_file、edit_file、create_project，以及 filesystem MCP 的 write_file、create_directory 支持后置条件核查；读取类重新获取当前观察，通用命令不猜测执行结果。用户选择继续后，无法确认的 Unknown 调用记录为 retry_allowed，由新 Worker 根据当前现场重新尝试，不提供人工核查回调。相同任务中已确认成功的继承调用可以复用结果。暂不实现无人确认自动续跑、跨进程执行权抢占或上下文压缩的跨文件提交 Checkpoint。恢复不等于精确恢复中断时的程序指令位置，也不保证任意外部副作用只执行一次。
 
 ## 阅读顺序
 
@@ -43,7 +43,7 @@ internal/agent/multiagent/plan_execute_agent.go / task_executor.go / task_schedu
     保存确认计划，记录 Worker 和 Reviewer，按恢复状态跳过已完成任务
         ↓
 internal/agent/multiagent/resume.go
-    校验中断计划，有未知调用则暂停，否则恢复确认计划与任务调度
+    校验中断计划，核查未知调用或记录允许重试，恢复确认计划与任务调度
         ↓
 internal/agent/react_agent.go
     持有 Recorder，显式 StartRun + defer FinishRun，直接执行工具并记录前后事件
@@ -235,7 +235,8 @@ RunRecorder
        ├── 保存核查事件后更新内存，不读取或重放日志
        ├── completed：核查确认已完成，Call 状态 reconciled
        ├── not_executed：核查确认未执行，Call 状态 not_executed
-       └── unknown：核查仍不确定，保持 unknown，允许再次核查
+       ├── unknown：核查仍不确定，保持 unknown，允许再次核查
+       └── retry_allowed：旧结果仍不确定，但用户已选择继续，允许新的尝试，不复用旧结果
 ```
 
 任务状态由事件推导：计划中的任务初始为 `pending`；开始而未返回为 `interrupted`；Worker 返回后为 `awaiting_review`；审查通过为 `completed`。失败或取消后允许增加 Attempt 重试，但同一任务旧尝试仍有未知调用时必须先核查。
@@ -251,12 +252,12 @@ RunRecorder
 ```text
 PlanAndExecuteAgent.Resume
 ├── 接收 CLI 已重放并经用户确认的旧 RunState，校验会话、状态和类型
-├── 检查未知调用：存在 Unknown 则暂停，旧 Run 保持不变
+├── 核查 Unknown：内容匹配则复用；无法确认则按用户继续意图记录 retry_allowed
 └── Recorder.StartRecoveredRun(ctx, source)
     ├── 检查传入状态的会话、身份、中断状态和确认计划
     ├── 深拷贝计划、任务进度和工具调用状态
     ├── 保存 run_started：kind、resumed_from、input
-    └── 返回新 RunRecorder 和继承状态，不读取或重放日志
+    └── 返回新 RunRecorder 和继承状态，不读取或重放日志；随后保存核查事件再恢复调度
 ```
 
 例如旧计划中 A 已完成、B 等待审查、C 尚未开始，恢复 Run 保留 A 的结果、B 的 Worker 输出和待审查状态，以及 C 的 pending 状态。新 Run 中 B 审查通过，不会把旧 Run 中 B 的历史进度也改成完成。返回给调用方的状态与 Recorder 内部状态也相互隔离。
@@ -267,11 +268,54 @@ PlanAndExecuteAgent.Resume
 
 同一个 Recorder 内会拒绝对同一来源重复创建恢复 Run。重启后由 CLI 通过 LoadRuns 获取完整重放或检查点增量重放的最新状态，不能将上次进程的旧快照直接用于新 Recorder。Resume 信任调用方提供的已重放快照；从启动读取到确认恢复之间不能有其他执行器写入该会话，旧执行器必须已经停止。当前不支持多进程写同一会话，也不是跨进程抢占或 Worker fencing 机制。
 
-restorePlan(run) 和调度器通过 RunRecorder.State() 读取内存状态，继续恢复调度。启动展示、用户确认和 Resume 共用同一次 Load + Replay 的结果，Resume 和 StartRecoveredRun 都不会再次读取事件日志。底层仍保留核查事件的存储和重放支持，但当前恢复入口不收集核查结论。
+restorePlan(run) 和调度器通过 RunRecorder.State() 读取内存状态，继续恢复调度。启动展示、用户确认和 Resume 共用同一次 Load + Replay 的结果，Resume 和 StartRecoveredRun 都不会再次读取事件日志。Resume 在创建恢复 Run 前收集未知调用的核查或重试决策，在新 Run 持久化后，再读取最新内存状态交给调度流程。
 
 核查事件不会自动读取文件、运行验证工具或调用模型。调用方先检查外部状态，再提供结论和 `Evidence`；非空依据本身不代表结论必然正确。不能将“LLM 认为已经执行”当作可靠核查。该事件不伪造原工具的返回记录，也不自动触发重试。
 
-核查事件的语义是：有依据确认旧调用完成后，写入引用旧 Run 和 CallID 的核查事件，Replay 将调用还原为 `reconciled`，不会自动完成任务。无关 Run、缺失调用和已返回结果不能被核查事件覆盖。这是底层事件能力，当前 CLI 不提供填写结论或自动检查的入口。
+核查事件的语义是：有依据确认调用工作已满足后，写入引用旧 Run 和 CallID 的核查事件，Replay 将调用还原为 `reconciled`，不会自动完成任务。无关 Run、缺失调用和已返回结果不能被核查事件覆盖。CLI 不提供人工填写结论的入口。
+
+### 内置 write_file 自动核查
+
+```text
+Plan-and-Execute Resume 收到 Unknown 调用
+├── 解析原调用参数，按注册工具查询 ToolRegistry.Verify
+│      └── 内置 write_file 的 Verify → BuiltinProvider.verifyWriteFile
+│             ├── 校验 file_path、content，并通过 Workspace.Resolve 检查边界
+│             ├── 获取与内置读写工具共用的文件读锁
+│             ├── 读取普通文件，比较完整内容（包括空内容）
+│             ├── 缺失 / 不匹配 → 无法确认，不写文件，不推断未执行
+│             └── 匹配 → 返回路径、字节数、SHA-256 证据与核查结果
+├── 核查满足目标 → 决策 completed，可复用结果
+├── 不支持 / 无法确认 / 读取失败 / 原参数无效 → 决策 retry_allowed，允许新 Worker 尝试
+└── 创建恢复 Run → ReconcileToolCall 落盘 → 恢复调度；取消或持久化失败仍停止
+```
+
+核查能力作为 Tool 的可选 Verify 字段绑定在注册项上，RegisterProvider、RegisterEnabledTools 和 Subset 均保留它。只通过 RegisterTool 注册的同名自定义处理器不会自动得到内置核查能力；MCP 工具也不会因与内置工具同名而获得内置核查能力。核查器只读文件，不调用实际写入 Handler，也不调用 LLM。
+
+`mcp__filesystem__write_file` 使用独立的核查器：仅当同一 MCP 服务端同时启用了 `read_text_file` 时，恢复流程才调用它读取原路径的完整文本，并与写入请求的 `content` 精确比较。匹配时保存当前内容的哈希与核查结论；缺失、MCP 读取失败或内容不匹配时保留不确定性，让 Worker 决定下一次尝试。该核查只绑定到注册名为 `filesystem` 的 MCP 服务端的 `write_file`，不会调用其写入工具，也不会借用本地内置 `write_file` 的文件权限或路径规则。
+
+`mcp__filesystem__create_directory` 仅在同一服务端同时启用 `get_file_info` 时核查。恢复时读取原路径的文件信息，明确得到 `isDirectory: true` 且 `isFile: false` 才确认目录已存在；缺失、类型不符或无法读取时保留不确定性，让 Worker 继续处理。MCP `edit_file` 暂不接自动核查；Unknown 时由恢复后的 Worker 查看当前文件，决定是否重新调用工具。
+
+内置 `read_file`、`list_dir` 和 filesystem MCP 的 `read_text_file`、`list_directory`、`get_file_info` 是现场观察。恢复后 Worker 再次请求这些工具时，旧 Run 即使已记录成功结果，也不复用；新调用重新读取当前状态。旧日志中已记录的 `ReusedFrom` 仍可重放。
+
+MCP `brave_web_search` 和 `fetch` 同样不复用旧查询结果；恢复后 Worker 再次请求时重新查询。MCP `shell_execute` 和 `edit_file` 没有统一后置条件核查器，Unknown 保持不确定并交给恢复后的 Worker 检查现场、决定下一步。
+
+其余内置工具按下面的规则处理：
+
+| 工具 | Verify 的处理 | 恢复决策 |
+| --- | --- | --- |
+| edit_file | 调用开始前准备修改前后完整文件哈希，恢复时比较预期后哈希，并核对路径和参数身份 | 完整匹配才复用；无证据、缺失或不匹配则新尝试 |
+| create_project | 逐一比较所有请求文件的完整内容，检查相对路径、工作区边界及符号链接；部分存在不能算完成 | 全部匹配才复用，否则 Worker 修复剩余文件 |
+| read_file / list_dir | 返回 Retry=true，要求重新读取，不在核查器中执行读取 Handler | retry_allowed，新调用获取当前结果 |
+| execute_command | 返回 Retry=true，说明任意命令没有统一后置条件；核查器不执行命令 | retry_allowed，Worker 通过正常权限流程决定新命令 |
+
+`Tool.PrepareVerification(ctx, args)` 是可选的执行前取证方法，目前只有 edit_file 使用。Agent 在 tool_call_started 前准备证据，将其作为 `ToolCallEventData.VerificationData` 字符串持久化；Recorder 和 Replay 保留在 `CallState.VerificationData` 中，Checkpoint 也随状态保存。恢复时传给 `ToolRegistry.Verify(ctx, name, args, data)`。实际工具执行仍由 Agent 自己调用，取证方法不包裹执行。
+
+edit_file 的证据包含解析后的路径、规范化参数哈希、修改前后 SHA-256 和替换次数，不保存额外的文件正文。修改计算与实际 Handler 共用字符串替换规则，包括 replace_all、删除和新文本包含旧文本的情况。旧日志没有该字段时向后兼容，按未知结果允许新尝试；证据读取失败不阻止正常工具执行，之后无法确认时同样重试。取证读取限制为 16 MiB，超限时不生成证据。取证和执行不是跨进程事务；若文件之后改变而不满足预期完整哈希，就不会复用。项目核查是逐文件观察，不提供跨文件事务。
+
+这里使用明确的后置条件策略：当前完整内容等于请求内容，视为 write_file 的目标已经满足，可记录 completed 核查结论并复用结果；这不证明旧调用历史上成功执行过。Evidence 和 Result 明确区分“当前核查结果”与“旧工具返回”，不伪造 tool_call_completed。文件不匹配或不存在不能证明未执行，不会标为 not_executed；用户选择继续后，记录 retry_allowed 决策，让 Worker 根据当前现场重新调用工具，使用新的 CallID 和正常权限流程。旧调用没有成功结果，不能被复用。
+
+核查记录写入失败时不派发 Worker，新恢复 Run 保持中断和未解决调用，供下次恢复。文件锁只协调本进程内置工具；核查结果是读取时的观察，不保证文件之后不会被其他进程修改。当前自动核查只接入 Plan-and-Execute，ReAct 的模型引导恢复保持原流程。
 
 ### Plan-and-Execute 已接入的调用链
 
@@ -298,24 +342,26 @@ PlanAndExecuteAgent.Run
 ```text
 Resume(ctx, selectedRun)
 ├── 接收选中的 RunState：校验会话、中断状态和执行类型，不重新 Load / Replay
-├── 有 Unknown 调用 → 返回需要核查的错误，不创建新 Run、不执行工具
+├── 核查 Unknown：按实际工具绑定的核查器检查后置条件或要求新的尝试
+│      └── 无法确认 → 保存 retry_allowed 决策，继续任务，不伪装成旧调用已成功或未执行
 ├── 创建独立规划上下文、新调度器和执行器
 ├── 尚无确认计划 → 新的关联 Run，重新生成草稿并等待执行确认
 └── 已有确认计划 → StartRecoveredRun
        ├── 继承原计划和任务进度
+       ├── 保存核查及重试决策，更新内存状态后再调度
        ├── completed → 保留结果，跳过 Worker 和 Reviewer
        ├── awaiting_review → 只恢复 Reviewer，复用 Worker 输出
        ├── interrupted → 关闭旧尝试，新 Attempt 创建新 Worker
        └── pending / failed / cancelled → 按依赖安排后续尝试
 ```
 
-普通任务和恢复任务共用资源冲突检测、并发上限、任务超时和 Reviewer 流程。恢复时完整保留依赖结果；Worker 的记忆命名包含 Run、计划版本、任务和尝试身份，避免重启后与旧任务记录混淆。中断 Worker 的历史调用作为有长度上限的参考信息交给新 Worker；不复用旧的 goroutine 或不完整工具消息上下文。
+普通任务和恢复任务共用资源冲突检测、并发上限、任务超时和 Reviewer 流程。恢复时完整保留依赖结果；Worker 的记忆命名包含 Run、计划版本、任务和尝试身份，避免重启后与旧任务记录混淆。中断 Worker 的历史调用作为有长度上限的参考信息交给新 Worker；不复用旧的 goroutine 或不完整工具消息上下文。恢复说明明确任务目标仍有效，无法确认的是具体工具调用；Worker 优先读取或查询现场，目标已满足则跳过，未满足则重新选择补齐方法。retry_allowed 不要求机械重放旧调用；无法核实时，仅在重复操作没有不希望的额外影响或具备幂等性时直接重试，否则继续寻找核实、修复办法或报告不确定性。
 
 [tool_reuse.go](../../internal/execution/tool_reuse.go) 支持恢复期间的有限结果复用：同一任务、同一计划版本、相同工具名和规范化 JSON 参数，且原调用成功返回或经核查确认完成。新日志中的 `reused_from` 指向旧 CallID，Replay 校验复用结果与来源一致。未知、确认未执行、返回错误和不同参数均不会命中；大整数参数使用 UseNumber 保留身份精度。这个机制不覆盖不同计划版本或任意业务幂等性。
 
 Worker 对 Reviewer 只读工具集中的工具仍重新执行，以便检查当前现场；Reviewer 自身所有工具也重新执行。工具是否只读继续由已有的 Reviewer 工具选择配置决定，不由模型自行声明。
 
-当前已移除 RecoveryResolver、相关注入选项和 CLI 人工填写核查结论的实现。没有 Unknown 调用时正常恢复；存在 Unknown 时保持原状态并暂停恢复，后续再实现自动检查。Worker 的恢复提示只是历史参考和检查建议，不能代替核查事件或证明副作用已发生。Checkpoint 只加速还原，不会自动消除这些未知调用。
+当前已移除 RecoveryResolver、相关注入选项和 CLI 人工填写核查结论的实现。Unknown 通过工具绑定的核查器检查；无法确认或核查器要求重新读取时，基于用户已经选择继续的意图记录 retry_allowed 后继续。Worker 恢复提示说明旧调用仍不确定、允许新尝试；这不证明副作用从未发生，重复副作用仍有可能。Checkpoint 只加速还原，不会自动消除不确定性。恢复 API 的调用方应在用户确认继续后才调用 Resume。
 
 ## 写入顺序
 
@@ -367,6 +413,7 @@ Store 为每个会话缓存最后序号和有效字节位置：首次追加优�
 有核查且确认执行完成             → Call 状态 reconciled
 有核查且确认未执行               → Call 状态 not_executed
 核查仍无法确定                   → Call 状态保持 unknown
+用户选择继续、允许新的尝试       → Call 状态 retry_allowed，旧结果仍不确定
 ```
 
 `unknown` 不能当作“尚未执行”。例如文件已写入，但结果事件尚未落盘就退出，重放只能知道结果不确定。
@@ -563,9 +610,9 @@ Replay 处理 B 的开始事件时，同时更新 A 的状态，因此不需要�
 
 1. Replay 得到原 Run：Interrupted，读取 Returned，修改 Unknown。
 2. CLI 提示一次，用户选择 y。
-3. Resume 重新检查日志，整理恢复提示，创建独立上下文。
-4. 新 Run 开始，ResumedFrom 指向原 Run。
-5. 模型根据提示检查文件，决定还需要哪些操作。
+3. Resume 使用已重放状态；若修改是内置 write_file，检查当前文件完整内容，无法确认则允许新尝试。
+4. 创建独立上下文和新 Run，ResumedFrom 指向原 Run，并保存核查或 retry_allowed 决策。
+5. 新 Worker 根据历史参考完成剩余工作；同任务同参数的已核查写入可复用，任务仍需正常完成与审查。
 6. 新调用继续由 Store 记录，最终新 Run Completed。
 7. 根会话保存最终回答，下次启动不再提示这两个已结束的执行。
 ```
@@ -587,7 +634,7 @@ go test -race ./internal/execution ./internal/agent ./cmd/catcli -count=1
 | --- | --- |
 | 工具开始事件写入前 | 任务已开始，尚无调用记录 |
 | 工具开始事件写入后 | 调用为 Unknown，尚无文件副作用 |
-| 文件副作用完成、结果事件写入前 | 文件已修改，调用仍为 Unknown；规划恢复暂停，不重复写入 |
+| 文件副作用完成、结果事件写入前 | 文件已修改，重放后调用仍为 Unknown；重放本身不执行写入 |
 | 工具结果写入后 | 调用为 Returned，任务仍未结束 |
 | Worker 结果写入后 | 任务等待审核 |
 | 任务完成事件写入后 | 任务完成，Run 尚未结束 |
@@ -605,11 +652,13 @@ go test -race ./cmd/catcli -run 'Test(ExecutionRecoveryAfterSIGKILL|CheckpointRe
 
 执行日志和恢复相关测试按下面的顺序读：
 
-- [cmd/catcli/execution_crash_test.go](../../cmd/catcli/execution_crash_test.go)：上述 10 个真实 SIGKILL 窗口、重新打开恢复、未知调用阻止续跑和检查点发布前后的一致性。
+- [cmd/catcli/execution_crash_test.go](../../cmd/catcli/execution_crash_test.go)：上述 10 个真实 SIGKILL 窗口、重新打开恢复、保留未知调用事实和检查点发布前后的一致性；核查与新尝试另由 multiagent 集成测试覆盖。
 - [internal/execution/state_test.go](../../internal/execution/state_test.go)：计划和任务落盘重开、版本替换、依赖与尝试校验、审查边界、祖先调用核查以及计划写入失败。
 - [internal/execution/checkpoint_test.go](../../internal/execution/checkpoint_test.go)：50 条触发、字节定位和游标、快照损坏回退、日志替换 / 截短、半行尾部、跨检查点恢复链及核查、输入隔离、并发保存、写入失败和权限。
 - [internal/execution/recovery_test.go](../../internal/execution/recovery_test.go)：重新打开日志后继承进度、连续两次恢复、未知调用核查同步、恢复引用校验、开始记录失败和同一 Recorder 的重复恢复竞争。
 - [internal/agent/multiagent/execution_integration_test.go](../../internal/agent/multiagent/execution_integration_test.go)：确认计划、自动重规划、并行角色身份、跳过已完成任务、只恢复审查、草稿恢复、未知写调用核查与结果复用，以及两种角色的持久化失败。使用本地 HTTP 模型替身和带 MCP 名称的测试工具，不连接真实模型或 MCP 服务。
+- [internal/tool/write_file_verification_test.go](../../internal/tool/write_file_verification_test.go)：内置写入后置条件核查、空内容、缺失与不匹配、路径边界与符号链接、取消、注册与 Subset 保留核查器，以及同名自定义工具不冒用核查能力。
+- [internal/tool/verification_test.go](../../internal/tool/verification_test.go)：编辑取证与完整哈希比较、替换与删除、旧日志及无效依据、项目全部或部分完成、路径边界，以及读取和命令核查不会执行 Handler。multiagent 集成测试另覆盖真实内置工具执行成功但结果记录失败后，经 Checkpoint 恢复并复用或重新读取。
 - [cmd/catcli/execution_routing_test.go](../../cmd/catcli/execution_routing_test.go)：旧日志、ReAct、规划草稿与确认计划的恢复路由。
 
 - [cmd/catcli/execution_log_test.go](../../cmd/catcli/execution_log_test.go)：只检查最后一个 Run、最后一个已结束时不提示更早中断 Run、继续回调、放弃落盘、EOF 不修改历史。

@@ -4,9 +4,80 @@ import (
 	"AgentCLI/internal/plan"
 	"context"
 	"errors"
+	"reflect"
 	"sync"
 	"testing"
 )
+
+func TestAuthorizedRetryPersistsWithoutInventingOldCompletion(t *testing.T) {
+	store := newTestStore(t)
+	recorder := NewRecorder(store, "conversation")
+	old, err := recorder.StartRun(t.Context(), "write", "", PlanAndExecuteRun)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := old.SavePlan(t.Context(), PlanEventData{PlanID: "plan", Revision: 1, Tasks: []plan.TaskDefinition{{ID: "write"}}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := old.RecordTask(t.Context(), TaskStarted, TaskEventData{Revision: 1, TaskID: "write", Attempt: 1}); err != nil {
+		t.Fatal(err)
+	}
+	call, err := old.StartToolCall(t.Context(), ToolCallEventData{ToolCallID: "old-model", ToolName: "write_file", Arguments: `{}`, Task: &TaskReference{Revision: 1, TaskID: "write", Attempt: 1}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	run, _, err := recorder.StartRecoveredRun(t.Context(), recoverySource(t, recorder, old.ID()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := run.ReconcileToolCall(t.Context(), ToolCallReconciliation{SourceRunID: old.ID(), CallID: call.CallID, Outcome: AuthorizedRetry, Evidence: "user chose to continue; outcome remains uncertain"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, ok := run.ReusableToolResult(TaskReference{Revision: 1, TaskID: "write", Attempt: 2}, "write_file", `{}`); ok {
+		t.Fatal("reused retry-allowed call")
+	}
+	if err := run.RecordTask(t.Context(), TaskCancelled, TaskEventData{Revision: 1, TaskID: "write", Attempt: 1}); err != nil {
+		t.Fatal(err)
+	}
+	if err := run.RecordTask(t.Context(), TaskStarted, TaskEventData{Revision: 1, TaskID: "write", Attempt: 2}); err != nil {
+		t.Fatal(err)
+	}
+	fresh, err := run.StartToolCall(t.Context(), ToolCallEventData{ToolCallID: "new-model", ToolName: "write_file", Arguments: `{}`, Task: &TaskReference{Revision: 1, TaskID: "write", Attempt: 2}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := run.CompleteToolCall(t.Context(), fresh.CallID, "new result", nil); err != nil {
+		t.Fatal(err)
+	}
+	for _, typ := range []EventType{TaskWorkCompleted, TaskCompleted} {
+		if err := run.RecordTask(t.Context(), typ, TaskEventData{Revision: 1, TaskID: "write", Attempt: 2, Result: "done"}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := run.FinishRun(t.Context(), "done", nil); err != nil {
+		t.Fatal(err)
+	}
+	events, full := recoveryStates(t, recorder)
+	if full[0].Calls[0].Status != RetryAllowed || full[0].Calls[0].Result != "" || full[1].Calls[1].CallID == call.CallID {
+		t.Fatal("changed historical execution facts")
+	}
+	for _, e := range events {
+		if e.Type == ToolCallCompleted && e.ToolCall.CallID == call.CallID {
+			t.Fatal("invented old completion event")
+		}
+	}
+	if err := store.SaveCheckpoint(t.Context(), "conversation"); err != nil {
+		t.Fatal(err)
+	}
+	reopened, err := NewJSONLEventStore(store.root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := reopened.LoadRuns(t.Context(), "conversation")
+	if err != nil || !reflect.DeepEqual(got, full) {
+		t.Fatalf("checkpoint lost retry decision: %v", err)
+	}
+}
 
 func recordRecoveryTask(t *testing.T, run *RunRecorder, typ EventType, id, result string) {
 	t.Helper()

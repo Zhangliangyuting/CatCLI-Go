@@ -9,6 +9,15 @@ import (
 	"time"
 )
 
+// A generic command has no reliable universal postcondition. Verification
+// never runs it; the Worker may make a new attempt through normal permissions.
+func verifyCommand(ctx context.Context, _ map[string]any, _ string) (*Verification, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	return &Verification{Retry: true, Evidence: "arbitrary command completion cannot be established from arguments; prior outcome remains uncertain; any fresh command must use normal execution permissions"}, nil
+}
+
 func ExecuteCommandDefinition() Definition {
 	return Definition{
 		Type: "function",

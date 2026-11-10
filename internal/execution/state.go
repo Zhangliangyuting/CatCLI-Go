@@ -9,16 +9,17 @@ type RunStatus string
 type CallStatus string
 
 const (
-	Interrupted RunStatus  = "interrupted"
-	Completed   RunStatus  = "completed"
-	Failed      RunStatus  = "failed"
-	Cancelled   RunStatus  = "cancelled"
-	Abandoned   RunStatus  = "abandoned"
-	Resumed     RunStatus  = "resumed"
-	Unknown     CallStatus = "unknown"
-	Returned    CallStatus = "returned"
-	Reconciled  CallStatus = "reconciled"
-	NotExecuted CallStatus = "not_executed"
+	Interrupted  RunStatus  = "interrupted"
+	Completed    RunStatus  = "completed"
+	Failed       RunStatus  = "failed"
+	Cancelled    RunStatus  = "cancelled"
+	Abandoned    RunStatus  = "abandoned"
+	Resumed      RunStatus  = "resumed"
+	Unknown      CallStatus = "unknown"
+	Returned     CallStatus = "returned"
+	Reconciled   CallStatus = "reconciled"
+	NotExecuted  CallStatus = "not_executed"
+	RetryAllowed CallStatus = "retry_allowed"
 )
 
 type CallState struct {
@@ -29,6 +30,7 @@ type CallState struct {
 	Status                                  CallStatus
 	Result, Error                           string
 	Reconciliation                          *ToolCallReconciliation
+	VerificationData                        string
 }
 
 type RunState struct {
@@ -269,7 +271,8 @@ func applyReconciliation(runs []RunState, indices map[string]int, current int, e
 // 对应 ToolCallReconciled 事件的 Reconciliation 载荷，不是完整 Event。
 // Replay 和 Recorder 均会调用；调用方负责校验调用身份及原状态。
 // completed -> Reconciled 并保存结果；not_executed -> NotExecuted；unknown 保持 Unknown。
-// 三种结论都会保存核查证据；本函数不执行工具或检查外部系统。
+// retry_allowed -> RetryAllowed，旧执行结果仍不确定，但允许新的尝试。
+// 所有结论都会保存证据；本函数不执行工具或检查外部系统。
 func reconcileCall(call *CallState, data ToolCallReconciliation) {
 	copy := data
 	call.Reconciliation = &copy
@@ -278,6 +281,8 @@ func reconcileCall(call *CallState, data ToolCallReconciliation) {
 		call.Status, call.Result = Reconciled, data.Result
 	case ConfirmedNotExecuted:
 		call.Status = NotExecuted
+	case AuthorizedRetry:
+		call.Status = RetryAllowed
 	case StillUnknown: // Keep uncertainty explicit.
 	}
 }

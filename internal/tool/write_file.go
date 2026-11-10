@@ -1,10 +1,69 @@
 package tool
 
 import (
+	"bytes"
 	"context"
+	"crypto/sha256"
 	"fmt"
+	"io"
 	"os"
 )
+
+// verifyWriteFile reads through the same workspace boundary and file lock as
+// the built-in writer. It never writes or infers non-execution from a mismatch.
+func (p BuiltinProvider) verifyWriteFile(ctx context.Context, args map[string]any, _ string) (*Verification, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	path, ok := args["file_path"].(string)
+	if !ok || path == "" {
+		return nil, fmt.Errorf("file_path is required")
+	}
+	content, ok := args["content"].(string)
+	if !ok {
+		return nil, fmt.Errorf("content is required")
+	}
+	path, err := p.workspace.Resolve(path)
+	if err != nil {
+		return nil, err
+	}
+	unlock := fileLocks.rlock(path)
+	defer unlock()
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	info, err := os.Stat(path)
+	if os.IsNotExist(err) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	if !info.Mode().IsRegular() || info.Size() != int64(len(content)) {
+		return nil, nil
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	// Bound reads even if another process grows the file after Stat.
+	data, err := io.ReadAll(io.LimitReader(f, int64(len(content))+1))
+	if err != nil {
+		return nil, err
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if !bytes.Equal(data, []byte(content)) {
+		return nil, nil
+	}
+	sum := sha256.Sum256(data)
+	return &Verification{
+		Evidence: fmt.Sprintf("write_file postcondition verified: path=%q bytes=%d sha256=%x; current full content matches requested content; historical execution is not established", path, len(data), sum),
+		Result:   fmt.Sprintf("write_file recovery verified: current file content already matches requested content (%d bytes); no write performed", len(data)),
+	}, nil
+}
 
 func WriteFileDefinition() Definition {
 	return Definition{

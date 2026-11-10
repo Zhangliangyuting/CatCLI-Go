@@ -99,13 +99,13 @@ func replayEvents(runs []RunState, conversationID string, afterSequence uint64, 
 			if _, err := reusedCallResult(*run, *e.ToolCall); err != nil {
 				return nil, err
 			}
-			run.Calls = append(run.Calls, CallState{ReusedFrom: e.ToolCall.ReusedFrom, OriginRunID: e.RunID, Task: e.ToolCall.Task, CallID: e.ToolCall.CallID, ToolCallID: e.ToolCall.ToolCallID, ToolName: e.ToolCall.ToolName, Arguments: e.ToolCall.Arguments, Status: Unknown})
+			run.Calls = append(run.Calls, CallState{ReusedFrom: e.ToolCall.ReusedFrom, OriginRunID: e.RunID, Task: e.ToolCall.Task, CallID: e.ToolCall.CallID, ToolCallID: e.ToolCall.ToolCallID, ToolName: e.ToolCall.ToolName, Arguments: e.ToolCall.Arguments, VerificationData: e.ToolCall.VerificationData, Status: Unknown})
 		case ToolCallCompleted:
 			if callIndex < 0 {
 				return nil, fmt.Errorf("result without tool call start %s", e.ToolCall.CallID)
 			}
 			call := &run.Calls[callIndex]
-			if call.OriginRunID != e.RunID || call.Status != Unknown || call.ToolCallID != e.ToolCall.ToolCallID || call.ToolName != e.ToolCall.ToolName || call.ReusedFrom != e.ToolCall.ReusedFrom || !sameTaskReference(call.Task, e.ToolCall.Task) {
+			if call.OriginRunID != e.RunID || call.Status != Unknown || call.ToolCallID != e.ToolCall.ToolCallID || call.ToolName != e.ToolCall.ToolName || call.ReusedFrom != e.ToolCall.ReusedFrom || call.VerificationData != e.ToolCall.VerificationData || !sameTaskReference(call.Task, e.ToolCall.Task) {
 				return nil, fmt.Errorf("duplicate or mismatched tool result %s", e.ToolCall.CallID)
 			}
 			if call.ReusedFrom != "" {

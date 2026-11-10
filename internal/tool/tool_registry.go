@@ -24,6 +24,18 @@ type Handler func(
 type Tool struct {
 	Definition Definition
 	Handler    Handler
+	// Verify checks the current postcondition without executing the tool.
+	Verify func(context.Context, map[string]any, string) (*Verification, error)
+	// PrepareVerification captures evidence before the start event, never executes.
+	PrepareVerification func(context.Context, map[string]any) (string, error)
+}
+
+// Verification confirms a current postcondition or requests a fresh attempt.
+// It never supplies an invented historical return value. Nil is inconclusive.
+type Verification struct {
+	Evidence string
+	Result   string
+	Retry    bool // Requires a new observation/attempt instead of result reuse.
 }
 
 type ToolRegistry struct {
@@ -37,6 +49,11 @@ func NewToolRegistry() *ToolRegistry {
 }
 
 func (r *ToolRegistry) RegisterTool(definition Definition, handler Handler) {
+	r.register(Tool{Definition: definition, Handler: handler})
+}
+
+func (r *ToolRegistry) register(t Tool) {
+	definition := t.Definition
 	//检查空名字和重复注册
 	if definition.FunctionDefinition.Name == "" {
 		panic("tool name cannot be empty")
@@ -44,10 +61,37 @@ func (r *ToolRegistry) RegisterTool(definition Definition, handler Handler) {
 	if _, exists := r.tools[definition.FunctionDefinition.Name]; exists {
 		panic(fmt.Sprintf("tool already registered: %s", definition.FunctionDefinition.Name))
 	}
-	r.tools[definition.FunctionDefinition.Name] = Tool{
-		Definition: definition,
-		Handler:    handler,
+	r.tools[definition.FunctionDefinition.Name] = t
+}
+
+// Verify uses only the verifier attached to the registered tool. Names alone
+// never grant built-in verification to MCP or custom handlers.
+func (r *ToolRegistry) Verify(ctx context.Context, name string, args map[string]any, data string) (*Verification, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
 	}
+	if r == nil {
+		return nil, nil
+	}
+	t, ok := r.tools[name]
+	if !ok || t.Verify == nil {
+		return nil, nil
+	}
+	return t.Verify(ctx, args, data)
+}
+
+func (r *ToolRegistry) PrepareVerification(ctx context.Context, name string, args map[string]any) (string, error) {
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
+	if r == nil {
+		return "", nil
+	}
+	t, ok := r.tools[name]
+	if !ok || t.PrepareVerification == nil {
+		return "", nil
+	}
+	return t.PrepareVerification(ctx, args)
 }
 
 func (r *ToolRegistry) Execute(
@@ -90,7 +134,7 @@ func (r *ToolRegistry) Subset(names ...string) *ToolRegistry {
 
 func (r *ToolRegistry) RegisterProvider(provider Provider) {
 	for _, tool := range provider.Tools() {
-		r.RegisterTool(tool.Definition, tool.Handler)
+		r.register(tool)
 	}
 }
 
@@ -110,7 +154,7 @@ func (r *ToolRegistry) RegisterEnabledTools(providers []Provider, enabled []stri
 				continue
 			}
 
-			r.RegisterTool(t.Definition, t.Handler)
+			r.register(t)
 			registeredSet[name] = true
 		}
 	}

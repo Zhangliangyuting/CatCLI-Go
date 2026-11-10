@@ -186,7 +186,7 @@ func (agent *WorkerSubAgent) executeWorkerTool(
 	ctx context.Context,
 	call llm.ToolCall,
 ) (string, error) {
-	data, result, err := startToolCallRecording(ctx, call)
+	data, result, err := startToolCallRecording(ctx, agent.tools, call)
 	if err != nil {
 		return "", err
 	}

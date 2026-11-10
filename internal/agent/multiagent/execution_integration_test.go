@@ -5,11 +5,13 @@ import (
 	"AgentCLI/internal/llm"
 	"AgentCLI/internal/plan"
 	"AgentCLI/internal/tool"
+	"AgentCLI/internal/workspace"
 	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync/atomic"
@@ -20,6 +22,7 @@ import (
 const executionTestPlan = `{"goal":"update code","tasks":[{"id":"task_1","name":"update","description":"update file","type":"FILE_WRITE","dependencies":[],"write_resources":["main.go"]}],"summary":"update"}`
 
 type workflowTestFixture struct {
+	workerTool, workerArgs                 string
 	planJSON                               string
 	writesStarted                          chan struct{}
 	releaseWrites                          chan struct{}
@@ -58,7 +61,11 @@ func newExecutionFixture(t *testing.T) *workflowTestFixture {
 			if last.Role == "tool" {
 				response = llm.AssistantMessage("worker complete")
 			} else {
-				response = llm.Message{Role: "assistant", ToolCalls: []llm.ToolCall{{ID: "worker-call", Type: "function", Function: llm.FunctionCall{Name: "mcp__filesystem__write_file", Arguments: `{"path":"main.go","content":"updated"}`}}}}
+				name, args := f.workerTool, f.workerArgs
+				if name == "" {
+					name, args = "mcp__filesystem__write_file", `{"path":"main.go","content":"updated"}`
+				}
+				response = llm.Message{Role: "assistant", ToolCalls: []llm.ToolCall{{ID: "worker-call", Type: "function", Function: llm.FunctionCall{Name: name, Arguments: args}}}}
 			}
 		case ReviewerSystemPrompt:
 			f.reviewCalls.Add(1)
@@ -261,7 +268,7 @@ func TestPlanResumeSkipsCompletedAndReviewsSavedWorkerOutput(t *testing.T) {
 }
 
 // Build a historical reconciliation event to test compatibility with logs that
-// already contain a checked outcome. Resume itself performs no verification.
+// already contain a checked outcome, including externally verified MCP calls.
 func (f *workflowTestFixture) withRecordedReconciliation(t *testing.T, source executionlog.RunState, outcome executionlog.ReconciliationOutcome, result string) executionlog.RunState {
 	t.Helper()
 	_, err := f.store.Append(t.Context(), executionlog.Event{
@@ -278,22 +285,32 @@ func (f *workflowTestFixture) withRecordedReconciliation(t *testing.T, source ex
 	return runs[len(runs)-1]
 }
 
-func TestUnknownWriteMustBeCheckedAndVerifiedResultIsReused(t *testing.T) {
+func TestUnknownWriteWithoutVerifierContinuesInFreshAttempt(t *testing.T) {
 	f := newExecutionFixture(t)
 	source := f.interruptedPlan(t, "unknown")
-	before, _ := f.states(t)
-	if _, err := f.agent.Resume(t.Context(), source); !errors.Is(err, ErrRecoveryNeedsVerification) {
-		t.Fatalf("expected verification gate, got %v", err)
+	if _, err := f.agent.Resume(t.Context(), source); err != nil {
+		t.Fatal(err)
 	}
-	after, runs := f.states(t)
-	if len(before) != len(after) || runs[0].Status != executionlog.Interrupted || f.workerCalls.Load() != 0 {
-		t.Fatal("unknown call dispatched before verification")
+	_, runs := f.states(t)
+	if len(runs) != 2 || runs[1].Status != executionlog.Completed || runs[1].Tasks[0].Attempt != 2 || runs[1].Calls[0].Status != executionlog.RetryAllowed || f.writes.Load() != 1 {
+		t.Fatalf("unknown call did not retry: %+v writes=%d", runs, f.writes.Load())
 	}
+	if runs[1].Calls[1].CallID == source.Calls[0].CallID || runs[1].Calls[1].ReusedFrom != "" {
+		t.Fatal("retry reused old identity or result")
+	}
+	if runs[1].Calls[0].Result != "" || runs[1].Calls[0].Reconciliation.Outcome != executionlog.AuthorizedRetry {
+		t.Fatal("invented an old result")
+	}
+}
+
+func TestVerifiedHistoricalWriteResultIsReused(t *testing.T) {
+	f := newExecutionFixture(t)
+	source := f.interruptedPlan(t, "unknown")
 	source = f.withRecordedReconciliation(t, source, executionlog.ConfirmedCompleted, "updated")
 	if _, err := f.agent.Resume(t.Context(), source); err != nil {
 		t.Fatal(err)
 	}
-	_, runs = f.states(t)
+	_, runs := f.states(t)
 	if f.writes.Load() != 0 || f.reads.Load() != 1 || runs[1].Tasks[0].Attempt != 2 || runs[1].Status != executionlog.Completed {
 		t.Fatalf("repeated write or lost progress: writes=%d reads=%d runs=%+v", f.writes.Load(), f.reads.Load(), runs)
 	}
@@ -306,6 +323,216 @@ func TestUnknownWriteMustBeCheckedAndVerifiedResultIsReused(t *testing.T) {
 	if !found {
 		t.Fatal("reused tool result has no provenance")
 	}
+}
+
+func TestResumeAutomaticallyVerifiesBuiltinWriteFile(t *testing.T) {
+	for _, mode := range []string{"matching", "mismatch", "missing", "unsupported_call", "invalid_arguments", "verification_error", "persist_failure"} {
+		t.Run(mode, func(t *testing.T) {
+			f := newExecutionFixture(t)
+			root := t.TempDir()
+			work, err := workspace.New(root)
+			if err != nil {
+				t.Fatal(err)
+			}
+			f.agent.executor.tools.RegisterProvider(tool.NewBuiltinProvider(work))
+			f.workerTool, f.workerArgs = "write_file", `{"file_path":"main.go","content":"updated"}`
+			run, err := f.recorder.StartRun(t.Context(), "update code", "", executionlog.PlanAndExecuteRun)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := run.SavePlan(t.Context(), executionlog.PlanEventData{PlanID: "builtin-plan", Revision: 1, Tasks: []plan.TaskDefinition{{ID: "task_1", Type: plan.FILE_WRITE}}}); err != nil {
+				t.Fatal(err)
+			}
+			if err := run.RecordTask(t.Context(), executionlog.TaskStarted, executionlog.TaskEventData{Revision: 1, TaskID: "task_1", Attempt: 1}); err != nil {
+				t.Fatal(err)
+			}
+			ref := &executionlog.TaskReference{Revision: 1, TaskID: "task_1", Attempt: 1, Phase: "worker"}
+			oldArgs := f.workerArgs
+			if mode == "invalid_arguments" {
+				oldArgs = "{"
+			}
+			if mode == "verification_error" {
+				oldArgs = `{"file_path":"../outside","content":"updated"}`
+			}
+			if _, err := run.StartToolCall(t.Context(), executionlog.ToolCallEventData{ToolCallID: "old", ToolName: f.workerTool, Arguments: oldArgs, Task: ref}); err != nil {
+				t.Fatal(err)
+			}
+			if mode == "unsupported_call" {
+				if _, err := run.StartToolCall(t.Context(), executionlog.ToolCallEventData{ToolCallID: "other", ToolName: "mcp__filesystem__write_file", Arguments: `{}`, Task: ref}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			want := "updated"
+			if mode == "mismatch" {
+				want = "changed"
+			}
+			if mode != "missing" {
+				if err := os.WriteFile(filepath.Join(root, "main.go"), []byte(want), 0600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			_, states := f.states(t)
+			if mode == "mismatch" || mode == "invalid_arguments" || mode == "verification_error" {
+				f.workerArgs = `{"file_path":"main.go","content":"updated","overwrite":true}`
+			}
+			if mode == "persist_failure" {
+				f.agent.recorder = executionlog.NewRecorder(failedReconciliationStore{f.store}, f.recorder.ConversationID())
+			}
+			_, err = f.agent.Resume(t.Context(), states[0])
+			if mode == "matching" {
+				if err != nil {
+					t.Fatal(err)
+				}
+				_, states = f.states(t)
+				last := states[len(states)-1]
+				if last.Status != executionlog.Completed || last.Tasks[0].Attempt != 2 || states[0].Calls[0].Status != executionlog.Reconciled {
+					t.Fatalf("bad recovery: %+v", states)
+				}
+				if !strings.Contains(last.Calls[0].Reconciliation.Evidence, "current full content matches") {
+					t.Fatal("missing postcondition evidence")
+				}
+				if len(last.Calls) != 3 || last.Calls[1].ReusedFrom != states[0].Calls[0].CallID || f.plannerCalls.Load() != 0 {
+					t.Fatalf("did not reuse verified write: %+v", last.Calls)
+				}
+				// Default overwrite=false would fail if the real write were dispatched.
+				if last.Calls[1].Error != "" || !strings.Contains(last.Calls[1].Result, "no write performed") {
+					t.Fatal("repeated verified write")
+				}
+			} else if mode == "persist_failure" {
+				if err == nil {
+					t.Fatal("ignored reconciliation persistence failure")
+				}
+				_, states = f.states(t)
+				if len(states) != 2 || states[1].Status != executionlog.Interrupted || states[1].Calls[0].Status != executionlog.Unknown {
+					t.Fatal("lost recoverable unknown call")
+				}
+				if f.workerCalls.Load() != 0 {
+					t.Fatal("dispatched worker after failed reconciliation")
+				}
+			} else {
+				if err != nil {
+					t.Fatal(err)
+				}
+				_, states = f.states(t)
+				last := states[len(states)-1]
+				if last.Status != executionlog.Completed || last.Tasks[0].Attempt != 2 || f.workerCalls.Load() == 0 {
+					t.Fatalf("did not continue task: %+v", last)
+				}
+				if mode == "mismatch" || mode == "missing" || mode == "invalid_arguments" || mode == "verification_error" {
+					if last.Calls[0].Status != executionlog.RetryAllowed || last.Calls[0].Result != "" || last.Calls[1].ReusedFrom != "" || last.Calls[1].CallID == last.Calls[0].CallID {
+						t.Fatalf("bad retry history: %+v", last.Calls)
+					}
+					if last.Calls[1].Error != "" {
+						t.Fatalf("write retry failed: %+v", last.Calls[1])
+					}
+				}
+				if mode == "unsupported_call" && last.Calls[1].Status != executionlog.RetryAllowed {
+					t.Fatal("unsupported call prevented continuation")
+				}
+			}
+			if mode != "persist_failure" {
+				want = "updated"
+			}
+			data, readErr := os.ReadFile(filepath.Join(root, "main.go"))
+			if readErr != nil || string(data) != want {
+				t.Fatal("recovery did not reach requested content")
+			}
+		})
+	}
+}
+
+type failedReconciliationStore struct{ executionlog.EventStore }
+
+func TestBuiltinVerificationRestoresLostResultsAfterCheckpoint(t *testing.T) {
+	for _, name := range []string{"edit_file", "create_project", "read_file", "list_dir"} {
+		t.Run(name, func(t *testing.T) {
+			f := newExecutionFixture(t)
+			root := t.TempDir()
+			work, err := workspace.New(root)
+			if err != nil {
+				t.Fatal(err)
+			}
+			f.agent.executor.tools.RegisterProvider(tool.NewBuiltinProvider(work))
+			f.workerTool = name
+			path := filepath.Join(root, "file.txt")
+			if err := os.WriteFile(path, []byte("old text"), 0600); err != nil {
+				t.Fatal(err)
+			}
+			switch name {
+			case "edit_file":
+				f.workerArgs = `{"file_path":"file.txt","old_string":"old","new_string":"old new"}`
+			case "create_project":
+				f.workerArgs = `{"root":"project","files":[{"path":"a","content":"a"},{"path":"nested/b","content":"b"}]}`
+			case "read_file":
+				f.workerArgs = `{"path":"file.txt"}`
+			case "list_dir":
+				f.workerArgs = `{"path":"."}`
+			}
+			f.agent.recorder = executionlog.NewRecorder(failedToolResultStore{f.store, "worker"}, f.recorder.ConversationID())
+			if _, err := f.agent.Run(t.Context(), "update code"); err == nil {
+				t.Fatal("expected lost tool result")
+			}
+			if err := f.store.SaveCheckpoint(t.Context(), f.recorder.ConversationID()); err != nil {
+				t.Fatal(err)
+			}
+			states, err := f.store.LoadRuns(t.Context(), f.recorder.ConversationID())
+			if err != nil || len(states) != 1 || len(states[0].Calls) != 1 || states[0].Calls[0].Status != executionlog.Unknown {
+				t.Fatalf("lost source: %+v %v", states, err)
+			}
+			if name == "edit_file" && states[0].Calls[0].VerificationData == "" {
+				t.Fatal("edit proof not persisted before dispatch")
+			}
+			if name == "read_file" {
+				if err := os.WriteFile(path, []byte("fresh text"), 0600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if name == "list_dir" {
+				if err := os.WriteFile(filepath.Join(root, "fresh-marker"), nil, 0600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			f.agent.recorder = executionlog.NewRecorder(f.store, f.recorder.ConversationID())
+			if _, err := f.agent.Resume(t.Context(), states[0]); err != nil {
+				t.Fatal(err)
+			}
+			_, states = f.states(t)
+			last := states[len(states)-1]
+			if last.Status != executionlog.Completed || last.Tasks[0].Attempt != 2 {
+				t.Fatalf("incomplete recovery: %+v", last)
+			}
+			old, fresh := last.Calls[0], last.Calls[1]
+			if name == "edit_file" || name == "create_project" {
+				if old.Status != executionlog.Reconciled || fresh.ReusedFrom != old.CallID || fresh.Error != "" {
+					t.Fatalf("did not reuse verified mutation: %+v", last.Calls)
+				}
+			} else {
+				if old.Status != executionlog.RetryAllowed || fresh.ReusedFrom != "" {
+					t.Fatal("reused an interrupted observation")
+				}
+				want := "fresh text"
+				if name == "list_dir" {
+					want = "fresh-marker"
+				}
+				if !strings.Contains(fresh.Result, want) {
+					t.Fatalf("did not fetch current observation: %q", fresh.Result)
+				}
+			}
+			if name == "edit_file" {
+				data, _ := os.ReadFile(path)
+				if string(data) != "old new text" {
+					t.Fatalf("edit repeated: %q", data)
+				}
+			}
+		})
+	}
+}
+
+func (s failedReconciliationStore) Append(ctx context.Context, event executionlog.Event) (executionlog.Event, error) {
+	if event.Type == executionlog.ToolCallReconciled {
+		return executionlog.Event{}, errors.New("reconciliation disk failure")
+	}
+	return s.EventStore.Append(ctx, event)
 }
 
 type failedPlanStore struct{ executionlog.EventStore }
@@ -508,15 +735,6 @@ func TestPlanResumeUsesSuppliedStateWithoutLoadingHistory(t *testing.T) {
 			}
 			counted := &countedRecoveryLoads{EventStore: f.store}
 			f.agent.recorder = executionlog.NewRecorder(counted, f.recorder.ConversationID())
-			if stage == "unknown" {
-				if _, err := f.agent.Resume(t.Context(), source); !errors.Is(err, ErrRecoveryNeedsVerification) {
-					t.Fatalf("expected unknown-call gate, got %v", err)
-				}
-				if counted.loads.Load() != 0 || f.workerCalls.Load() != 0 || f.reviewCalls.Load() != 0 {
-					t.Fatal("unknown recovery loaded history or dispatched work")
-				}
-				return
-			}
 			if _, err := f.agent.Resume(t.Context(), source); err != nil {
 				t.Fatal(err)
 			}

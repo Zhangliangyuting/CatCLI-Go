@@ -13,6 +13,7 @@
       "tools": [
         "list_directory",
         "read_text_file",
+        "get_file_info",
         "edit_file",
         "write_file",
         "create_directory"

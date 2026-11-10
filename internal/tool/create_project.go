@@ -8,6 +8,62 @@ import (
 	"strings"
 )
 
+func (p BuiltinProvider) verifyCreateProject(ctx context.Context, args map[string]any, _ string) (*Verification, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	root, ok := args["root"].(string)
+	if !ok || root == "" {
+		return nil, fmt.Errorf("root is required")
+	}
+	root, err := p.workspace.Resolve(root)
+	if err != nil {
+		return nil, err
+	}
+	files, ok := args["files"].([]any)
+	if !ok || len(files) == 0 {
+		return nil, fmt.Errorf("files is required")
+	}
+	seen := make(map[string]bool)
+	var evidence []string
+	for _, raw := range files {
+		file, ok := raw.(map[string]any)
+		if !ok {
+			return nil, fmt.Errorf("invalid file item")
+		}
+		path, ok := file["path"].(string)
+		if !ok || path == "" || filepath.IsAbs(path) {
+			return nil, fmt.Errorf("file path must be nonempty and relative")
+		}
+		clean := filepath.Clean(path)
+		if clean == ".." || strings.HasPrefix(clean, ".."+string(os.PathSeparator)) {
+			return nil, fmt.Errorf("file path cannot escape root")
+		}
+		path, err = p.workspace.Resolve(filepath.Join(root, clean))
+		if err != nil {
+			return nil, err
+		}
+		// Reject ambiguous duplicate/symlink-alias targets rather than inventing a result.
+		if seen[path] {
+			return nil, nil
+		}
+		seen[path] = true
+		content, ok := file["content"].(string)
+		if !ok {
+			return nil, fmt.Errorf("file content is required")
+		}
+		check, err := p.verifyWriteFile(ctx, map[string]any{"file_path": path, "content": content}, "")
+		if err != nil || check == nil {
+			return nil, err
+		}
+		evidence = append(evidence, check.Evidence)
+	}
+	return &Verification{
+		Evidence: "create_project postcondition verified: all requested files match; " + strings.Join(evidence, "; "),
+		Result:   fmt.Sprintf("create_project recovery verified: all %d requested file(s) match under %s; no files written", len(files), root),
+	}, nil
+}
+
 func CreateProjectDefinition() Definition {
 	return Definition{
 		Type: "function",
