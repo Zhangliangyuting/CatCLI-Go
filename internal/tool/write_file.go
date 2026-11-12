@@ -4,9 +4,11 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"io"
 	"os"
+	"strings"
 )
 
 // verifyWriteFile reads through the same workspace boundary and file lock as
@@ -70,7 +72,7 @@ func WriteFileDefinition() Definition {
 		Type: "function",
 		FunctionDefinition: FunctionDefinition{
 			Name:        "write_file",
-			Description: "写入完整文件内容。默认只创建新文件；如果文件已存在，必须显式设置 overwrite=true 才会覆盖。",
+			Description: "写入完整文件内容。已有内容与请求相同时直接成功，不再写入。内容不同时，覆盖须设置 overwrite=true，并提供最近一次 read_file 返回的整文件哈希作为 expected_hash。哈希不匹配时先重新读取。",
 			Parameters: map[string]interface{}{
 				"type": "object",
 				"properties": map[string]interface{}{
@@ -85,6 +87,10 @@ func WriteFileDefinition() Definition {
 					"overwrite": map[string]interface{}{
 						"type":        "boolean",
 						"description": "文件已存在时是否允许覆盖，默认 false",
+					},
+					"expected_hash": map[string]interface{}{
+						"type":        "string",
+						"description": "覆盖已有文件时必填：读取该文件得到的 full_file_sha256；新建文件不填",
 					},
 				},
 				"required": []string{"file_path", "content"},
@@ -115,6 +121,10 @@ func WriteFileHandler(
 	if value, ok := args["overwrite"].(bool); ok {
 		overwrite = value
 	}
+	expected, err := expectedFileHash(args)
+	if err != nil {
+		return "", err
+	}
 
 	// Keep the existence check and write in one critical section.
 	unlock := fileLocks.lock(filePath)
@@ -124,18 +134,85 @@ func WriteFileHandler(
 		return "", err
 	}
 
-	if _, err := os.Stat(filePath); err == nil && !overwrite {
-		return "", fmt.Errorf("file already exists: %s, set overwrite=true to replace it", filePath)
-	} else if err != nil && !os.IsNotExist(err) {
+	info, err := os.Stat(filePath)
+	switch {
+	case err == nil:
+		if !info.Mode().IsRegular() {
+			return "", fmt.Errorf("expected a regular file: %s", filePath)
+		}
+		actual, err := fileSHA256(ctx, filePath)
+		if err != nil {
+			return "", err
+		}
+		if actual == contentHash([]byte(content)) {
+			return fmt.Sprintf("write_file completed, content already matches %s; no write performed", filePath), nil
+		}
+		if !overwrite {
+			return "", fmt.Errorf("file already exists: %s, set overwrite=true to replace it", filePath)
+		}
+		if expected == "" {
+			return "", fmt.Errorf("expected_hash is required to overwrite an existing file; read it again first")
+		}
+		if actual != expected {
+			return "", fmt.Errorf("file changed since read: expected_hash does not match; read %s again", filePath)
+		}
+	case os.IsNotExist(err):
+		if expected != "" {
+			return "", fmt.Errorf("file is missing: expected_hash requires an existing file; read %s again", filePath)
+		}
+	case err != nil:
 		return "", err
 	}
 	if err := ctx.Err(); err != nil {
 		return "", err
 	}
 
-	if err := os.WriteFile(filePath, []byte(content), 0644); err != nil {
+	if err := atomicWriteFile(ctx, filePath, []byte(content), info == nil); err != nil {
 		return "", err
 	}
 
 	return fmt.Sprintf("write_file completed, wrote %d bytes to %s", len(content), filePath), nil
+}
+
+// expectedFileHash is supplied by a prior read of the same file. An absent
+// value means create-if-absent, never permission to overwrite an existing file.
+func expectedFileHash(args map[string]any) (string, error) {
+	raw, exists := args["expected_hash"]
+	if !exists {
+		return "", nil
+	}
+	value, ok := raw.(string)
+	if !ok || len(value) != 64 {
+		return "", fmt.Errorf("expected_hash must be a 64-character SHA-256 hex string")
+	}
+	if _, err := hex.DecodeString(value); err != nil {
+		return "", fmt.Errorf("expected_hash must be a 64-character SHA-256 hex string")
+	}
+	return strings.ToLower(value), nil
+}
+
+func fileSHA256(ctx context.Context, path string) (string, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+	h := sha256.New()
+	buf := make([]byte, 32*1024)
+	for {
+		if err := ctx.Err(); err != nil {
+			return "", err
+		}
+		n, err := f.Read(buf)
+		if n > 0 {
+			_, _ = h.Write(buf[:n])
+		}
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return "", err
+		}
+	}
+	return fmt.Sprintf("%x", h.Sum(nil)), nil
 }

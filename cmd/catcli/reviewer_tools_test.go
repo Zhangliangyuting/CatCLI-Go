@@ -13,10 +13,10 @@ func TestSelectReviewerTools(t *testing.T) {
 		name            string
 		available, want []string
 	}{
-		{"builtin fallback", []string{"list_dir", "read_file", "edit_file", "execute_command"}, []string{"list_dir", "read_file"}},
-		{"MCP only", []string{"mcp__filesystem__list_directory", "mcp__filesystem__read_text_file", "mcp__filesystem__write_file", "mcp__shell__shell_execute"}, []string{"mcp__filesystem__list_directory", "mcp__filesystem__read_text_file"}},
-		{"prefer MCP", []string{"list_dir", "read_file", "mcp__filesystem__list_directory", "mcp__filesystem__read_text_file"}, []string{"mcp__filesystem__list_directory", "mcp__filesystem__read_text_file"}},
-		{"partial MCP", []string{"list_dir", "read_file", "mcp__filesystem__read_text_file", "mcp__other__read_text_file"}, []string{"list_dir", "mcp__filesystem__read_text_file"}},
+		{"builtin tools", []string{"list_dir", "read_file", "edit_file", "execute_command"}, []string{"list_dir", "read_file"}},
+		{"MCP only", []string{"mcp__filesystem__list_directory", "mcp__filesystem__read_text_file", "mcp__filesystem__write_file", "mcp__shell__shell_execute"}, nil},
+		{"prefer builtin", []string{"list_dir", "read_file", "mcp__filesystem__list_directory", "mcp__filesystem__read_text_file"}, []string{"list_dir", "read_file"}},
+		{"partial MCP", []string{"list_dir", "read_file", "mcp__filesystem__read_text_file", "mcp__other__read_text_file"}, []string{"list_dir", "read_file"}},
 		{"empty", nil, nil},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

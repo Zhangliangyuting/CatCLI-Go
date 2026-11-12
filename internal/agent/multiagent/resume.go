@@ -35,7 +35,10 @@ func (a *PlanAndExecuteAgent) Resume(ctx context.Context, selected executionlog.
 		decision := executionlog.ToolCallReconciliation{
 			SourceRunID: source.RunID, CallID: call.CallID,
 			Outcome:  executionlog.AuthorizedRetry,
-			Evidence: "user chose to continue the interrupted task; prior execution remains uncertain; no verified postcondition; allow a fresh attempt without reusing this call",
+			Evidence: "user chose to continue the interrupted task; prior execution remains uncertain; no verified postcondition; a fresh task attempt is allowed, but repeating the original operation is not thereby proven safe",
+		}
+		if a.executor.tools.IsReadOnly(call.ToolName) {
+			decision.Evidence += "; registered tool is read-only, so the Worker may request a new observation; the old result is not reusable"
 		}
 		var args map[string]any
 		if decodeErr := json.Unmarshal([]byte(call.Arguments), &args); decodeErr != nil {

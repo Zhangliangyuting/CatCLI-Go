@@ -24,14 +24,27 @@ type Handler func(
 type Tool struct {
 	Definition Definition
 	Handler    Handler
+	// ReadOnly permits a fresh observation after recovery. It does not make a
+	// previous result reusable, because the external state may have changed.
+	ReadOnly bool
 	// Verify checks the current postcondition without executing the tool.
 	Verify func(context.Context, map[string]any, string) (*Verification, error)
 	// PrepareVerification captures evidence before the start event, never executes.
 	PrepareVerification func(context.Context, map[string]any) (string, error)
 }
 
+// IsReadOnly reports an explicit property of the registered implementation.
+// An unregistered or custom tool is never assumed to be safe to repeat.
+func (r *ToolRegistry) IsReadOnly(name string) bool {
+	if r == nil {
+		return false
+	}
+	t, ok := r.tools[name]
+	return ok && t.ReadOnly
+}
+
 // Verification confirms a current postcondition or requests a fresh attempt.
-// It never supplies an invented historical return value. Nil is inconclusive.
+// Retry does not mean that repeating a mutation is safe. Nil is inconclusive.
 type Verification struct {
 	Evidence string
 	Result   string

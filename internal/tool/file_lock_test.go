@@ -10,7 +10,7 @@ import (
 	"testing"
 )
 
-func TestEditFileHandlerSerializesReadModifyWriteByPath(t *testing.T) {
+func TestEditFileHandlerRejectsConcurrentStaleVersions(t *testing.T) {
 	const edits = 32
 
 	filePath := filepath.Join(t.TempDir(), "shared.txt")
@@ -18,7 +18,8 @@ func TestEditFileHandlerSerializesReadModifyWriteByPath(t *testing.T) {
 	for i := range edits {
 		parts[i] = fmt.Sprintf("value_%02d", i)
 	}
-	if err := os.WriteFile(filePath, []byte(strings.Join(parts, "\n")), 0644); err != nil {
+	initial := strings.Join(parts, "\n")
+	if err := os.WriteFile(filePath, []byte(initial), 0644); err != nil {
 		t.Fatalf("WriteFile() error = %v", err)
 	}
 
@@ -32,9 +33,10 @@ func TestEditFileHandlerSerializesReadModifyWriteByPath(t *testing.T) {
 			<-start
 			oldValue := fmt.Sprintf("value_%02d", index)
 			_, err := EditFileHandler(context.Background(), map[string]interface{}{
-				"file_path":  filePath,
-				"old_string": oldValue,
-				"new_string": "updated_" + oldValue,
+				"file_path":     filePath,
+				"old_string":    oldValue,
+				"new_string":    "updated_" + oldValue,
+				"expected_hash": contentHash([]byte(initial)),
 			})
 			errs <- err
 		}(i)
@@ -43,20 +45,24 @@ func TestEditFileHandlerSerializesReadModifyWriteByPath(t *testing.T) {
 	close(start)
 	workers.Wait()
 	close(errs)
+	succeeded := 0
 	for err := range errs {
-		if err != nil {
-			t.Fatalf("EditFileHandler() error = %v", err)
+		if err == nil {
+			succeeded++
+		} else if !strings.Contains(err.Error(), "file changed since read") {
+			t.Fatalf("unexpected edit error = %v", err)
 		}
+	}
+	if succeeded != 1 {
+		t.Fatalf("%d edits succeeded with the same expected hash, want 1", succeeded)
 	}
 
 	content, err := os.ReadFile(filePath)
 	if err != nil {
 		t.Fatalf("ReadFile() error = %v", err)
 	}
-	for _, oldValue := range parts {
-		if !strings.Contains(string(content), "updated_"+oldValue) {
-			t.Fatalf("final content lost edit for %q", oldValue)
-		}
+	if strings.Count(string(content), "updated_value_") != 1 {
+		t.Fatalf("unexpected final content: %q", content)
 	}
 }
 

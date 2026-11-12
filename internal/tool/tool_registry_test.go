@@ -53,3 +53,21 @@ func TestToolRegistrySubsetRestrictsTools(t *testing.T) {
 		t.Fatal("write_file remained available in read-only subset")
 	}
 }
+
+func TestReadOnlyRecoveryClassificationUsesRegisteredImplementation(t *testing.T) {
+	registry := NewToolRegistry()
+	registry.RegisterProvider(NewBuiltinProvider(nil))
+	if !registry.IsReadOnly("read_file") || !registry.IsReadOnly("list_dir") {
+		t.Fatal("built-in observations must be eligible for a fresh read")
+	}
+	for _, name := range []string{"write_file", "edit_file", "execute_command", "create_project", "missing"} {
+		if registry.IsReadOnly(name) {
+			t.Fatalf("%s was classified as a repeatable observation", name)
+		}
+	}
+	custom := NewToolRegistry()
+	custom.RegisterTool(ReadFileDefinition(), ReadFileHandler)
+	if custom.IsReadOnly("read_file") {
+		t.Fatal("custom handler inherited built-in retry classification by name")
+	}
+}

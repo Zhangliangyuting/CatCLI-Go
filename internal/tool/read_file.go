@@ -27,7 +27,7 @@ func ReadFileDefinition() Definition {
 		Type: "function",
 		FunctionDefinition: FunctionDefinition{
 			Name:        "read_file",
-			Description: "分页读取不超过 256 KiB 的 UTF-8 文本文件；默认返回 16 KiB，并在未读完时提供 next_offset。",
+			Description: "分页读取不超过 256 KiB 的 UTF-8 文本文件；每页返回整个文件的 full_file_sha256。修改这个文件时把该值作为 expected_hash 传给写入或编辑工具。",
 			Parameters: map[string]interface{}{
 				"type": "object",
 				"properties": map[string]interface{}{
@@ -140,7 +140,8 @@ func ReadFileHandler(
 		)
 	}
 
-	return chunk, nil
+	// This is the hash of the complete snapshot read above, never of the page.
+	return fmt.Sprintf("[catcli: full_file_sha256=%s]\n%s", contentHash(data), chunk), nil
 }
 
 func readFileIntegerArgument(

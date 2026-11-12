@@ -57,7 +57,7 @@ func TestEditFileVerificationUsesPreparedFullFileHash(t *testing.T) {
 			if err := os.WriteFile(path, []byte(tc.before), 0600); err != nil {
 				t.Fatal(err)
 			}
-			args := map[string]any{"file_path": "file", "old_string": tc.old, "new_string": tc.replacement, "replace_all": tc.all}
+			args := map[string]any{"file_path": "file", "old_string": tc.old, "new_string": tc.replacement, "replace_all": tc.all, "expected_hash": contentHash([]byte(tc.before))}
 			proof, err := r.PrepareVerification(t.Context(), "edit_file", args)
 			if err != nil || proof == "" {
 				t.Fatalf("prepare: %q %v", proof, err)

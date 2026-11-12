@@ -46,11 +46,13 @@ func (p BuiltinProvider) Tools() []Tool {
 			Definition: ListDirDefinition(),
 			Handler:    p.pathHandler("path", ListDirHandler),
 			Verify:     verifyFreshRead,
+			ReadOnly:   true,
 		},
 		{
 			Definition: ReadFileDefinition(),
 			Handler:    p.pathHandler("path", ReadFileHandler),
 			Verify:     verifyFreshRead,
+			ReadOnly:   true,
 		},
 		{
 			Definition:          EditFileDefinition(),

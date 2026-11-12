@@ -29,11 +29,21 @@ func (p BuiltinProvider) prepareEditVerification(ctx context.Context, args map[s
 	if err != nil {
 		return "", err
 	}
+	expected, err := expectedFileHash(args)
+	if err != nil {
+		return "", err
+	}
+	if expected == "" {
+		return "", fmt.Errorf("expected_hash is required to edit an existing file; read it first")
+	}
 	unlock := fileLocks.rlock(path)
 	defer unlock()
 	data, err := readEditVerificationFile(ctx, path)
 	if err != nil {
 		return "", err
+	}
+	if contentHash(data) != expected {
+		return "", fmt.Errorf("file changed since read: expected_hash does not match; read %s again", path)
 	}
 	updated, count, err := applyFileEdit(string(data), old, replacement, all)
 	if err != nil {
@@ -162,7 +172,7 @@ func EditFileDefinition() Definition {
 		Type: "function",
 		FunctionDefinition: FunctionDefinition{
 			Name:        "edit_file",
-			Description: "对文件进行精确字符串替换。默认要求 old_string 在文件中只出现一次；如果 replace_all 为 true，则替换所有匹配项。",
+			Description: "对文件进行精确字符串替换。必须提供最近一次 read_file 返回的整文件哈希 expected_hash；文件变化时先重新读取。默认要求 old_string 只出现一次。",
 			Parameters: map[string]interface{}{
 				"type": "object",
 				"properties": map[string]interface{}{
@@ -182,8 +192,12 @@ func EditFileDefinition() Definition {
 						"type":        "boolean",
 						"description": "是否替换所有匹配项。false 时要求 old_string 只出现一次",
 					},
+					"expected_hash": map[string]interface{}{
+						"type":        "string",
+						"description": "必填：读取该文件得到的 full_file_sha256",
+					},
 				},
-				"required": []string{"file_path", "old_string", "new_string"},
+				"required": []string{"file_path", "old_string", "new_string", "expected_hash"},
 			},
 		},
 	}
@@ -206,6 +220,13 @@ func EditFileHandler(
 	if err != nil {
 		return "", err
 	}
+	expected, err := expectedFileHash(args)
+	if err != nil {
+		return "", err
+	}
+	if expected == "" {
+		return "", fmt.Errorf("expected_hash is required to edit an existing file; read it first")
+	}
 
 	// The lock covers the complete read-modify-write transaction. Locking only
 	// os.WriteFile would still allow two editors to calculate from stale data.
@@ -220,6 +241,9 @@ func EditFileHandler(
 	if err != nil {
 		return "", err
 	}
+	if contentHash(data) != expected {
+		return "", fmt.Errorf("file changed since read: expected_hash does not match; read %s again", filePath)
+	}
 
 	updated, count, err := applyFileEdit(string(data), oldString, newString, replaceAll)
 	if err != nil {
@@ -229,7 +253,7 @@ func EditFileHandler(
 		return "", err
 	}
 
-	if err := os.WriteFile(filePath, []byte(updated), 0644); err != nil {
+	if err := atomicWriteFile(ctx, filePath, []byte(updated), false); err != nil {
 		return "", err
 	}
 

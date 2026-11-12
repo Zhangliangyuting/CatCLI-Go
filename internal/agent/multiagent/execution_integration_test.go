@@ -7,8 +7,10 @@ import (
 	"AgentCLI/internal/tool"
 	"AgentCLI/internal/workspace"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -373,7 +375,7 @@ func TestResumeAutomaticallyVerifiesBuiltinWriteFile(t *testing.T) {
 			}
 			_, states := f.states(t)
 			if mode == "mismatch" || mode == "invalid_arguments" || mode == "verification_error" {
-				f.workerArgs = `{"file_path":"main.go","content":"updated","overwrite":true}`
+				f.workerArgs = fmt.Sprintf(`{"file_path":"main.go","content":"updated","overwrite":true,"expected_hash":"%x"}`, sha256.Sum256([]byte(want)))
 			}
 			if mode == "persist_failure" {
 				f.agent.recorder = executionlog.NewRecorder(failedReconciliationStore{f.store}, f.recorder.ConversationID())
@@ -394,7 +396,7 @@ func TestResumeAutomaticallyVerifiesBuiltinWriteFile(t *testing.T) {
 				if len(last.Calls) != 3 || last.Calls[1].ReusedFrom != states[0].Calls[0].CallID || f.plannerCalls.Load() != 0 {
 					t.Fatalf("did not reuse verified write: %+v", last.Calls)
 				}
-				// Default overwrite=false would fail if the real write were dispatched.
+				// The recorded result must come from recovery verification.
 				if last.Calls[1].Error != "" || !strings.Contains(last.Calls[1].Result, "no write performed") {
 					t.Fatal("repeated verified write")
 				}
@@ -460,7 +462,7 @@ func TestBuiltinVerificationRestoresLostResultsAfterCheckpoint(t *testing.T) {
 			}
 			switch name {
 			case "edit_file":
-				f.workerArgs = `{"file_path":"file.txt","old_string":"old","new_string":"old new"}`
+				f.workerArgs = fmt.Sprintf(`{"file_path":"file.txt","old_string":"old","new_string":"old new","expected_hash":"%x"}`, sha256.Sum256([]byte("old text")))
 			case "create_project":
 				f.workerArgs = `{"root":"project","files":[{"path":"a","content":"a"},{"path":"nested/b","content":"b"}]}`
 			case "read_file":

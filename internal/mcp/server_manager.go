@@ -95,16 +95,10 @@ func (m *ServerManager) Start(ctx context.Context) []ServerStatus {
 			for _, name := range cfg.Tools {
 				allowed[name] = true
 			}
-			available := map[string]bool{}
-			for _, descriptor := range descriptors {
-				if cfg.Tools == nil || allowed[descriptor.Name] {
-					available[descriptor.Name] = true
-				}
-			}
 			server := &Server{Name: name, Client: client}
 			for _, descriptor := range descriptors {
 				if cfg.Tools == nil || allowed[descriptor.Name] {
-					server.Tools = append(server.Tools, adaptTool(name, descriptor, client, available))
+					server.Tools = append(server.Tools, adaptTool(name, descriptor, client))
 					delete(allowed, descriptor.Name)
 				}
 			}

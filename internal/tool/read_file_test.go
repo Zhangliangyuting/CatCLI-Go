@@ -3,6 +3,7 @@ package tool
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -22,7 +23,7 @@ func TestReadFileHandlerReadsUTF8Text(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ReadFileHandler() error = %v", err)
 	}
-	if got != want {
+	if got != fmt.Sprintf("[catcli: full_file_sha256=%s]\n%s", contentHash([]byte(want)), want) {
 		t.Fatalf("ReadFileHandler() = %q, want %q", got, want)
 	}
 }
@@ -86,6 +87,10 @@ func TestReadFileHandlerPaginatesLargeText(t *testing.T) {
 	if !strings.Contains(first, "continue with offset=16384") {
 		t.Fatalf("first page does not contain next offset: %q", first[len(first)-100:])
 	}
+	marker := fmt.Sprintf("[catcli: full_file_sha256=%s]\n", contentHash(data))
+	if !strings.HasPrefix(first, marker) {
+		t.Fatalf("first page missing full-file hash: %q", first[:min(len(first), 100)])
+	}
 
 	second, err := ReadFileHandler(context.Background(), map[string]interface{}{
 		"path":   filePath,
@@ -94,7 +99,7 @@ func TestReadFileHandlerPaginatesLargeText(t *testing.T) {
 	if err != nil {
 		t.Fatalf("second ReadFileHandler() error = %v", err)
 	}
-	if second != string(data[defaultReadChunkBytes:]) {
+	if second != marker+string(data[defaultReadChunkBytes:]) {
 		t.Fatalf("second page length = %d, want %d", len(second), len(data)-defaultReadChunkBytes)
 	}
 }

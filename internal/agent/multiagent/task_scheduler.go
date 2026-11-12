@@ -195,7 +195,7 @@ func (s *TaskScheduler) Execute(
 						job.Reference.Attempt++
 					}
 					if saved.Attempt > 0 && !reviewOnly {
-						job.Prompt += taskRecoveryContext(recorded.Calls, taskID, recorded.Plan.Revision)
+						job.Prompt += taskRecoveryContext(recorded.Calls, taskID, recorded.Plan.Revision, executor.tools)
 					}
 					break
 				}

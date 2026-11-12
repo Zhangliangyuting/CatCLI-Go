@@ -4,7 +4,7 @@
 
 恢复会话历史，只能知道用户、模型和工具交换了什么消息。执行日志记录 ReAct 或 Plan-and-Execute Run 的开始、工具调用与结束，以及确认计划、Worker 返回和 Reviewer 审查进度。
 
-范围包括执行事实记录、状态重建、Checkpoint 与字节偏移增量读取、用户确认后的 ReAct 恢复，以及 Plan-and-Execute 的计划与任务进度恢复。Plan-and-Execute 对内置 write_file、edit_file、create_project，以及 filesystem MCP 的 write_file、create_directory 支持后置条件核查；读取类重新获取当前观察，通用命令不猜测执行结果。用户选择继续后，无法确认的 Unknown 调用记录为 retry_allowed，由新 Worker 根据当前现场重新尝试，不提供人工核查回调。相同任务中已确认成功的继承调用可以复用结果。暂不实现无人确认自动续跑、跨进程执行权抢占或上下文压缩的跨文件提交 Checkpoint。恢复不等于精确恢复中断时的程序指令位置，也不保证任意外部副作用只执行一次。
+范围包括执行事实记录、状态重建、Checkpoint 与字节偏移增量读取、用户确认后的 ReAct 恢复，以及 Plan-and-Execute 的计划与任务进度恢复。Plan-and-Execute 对内置 write_file、edit_file、create_project 支持后置条件核查；读取类重新获取当前观察，通用命令不猜测执行结果。用户选择继续后，无法确认的 Unknown 调用记录为 retry_allowed，由新 Worker 根据当前现场重新尝试，不提供人工核查回调。相同任务中已确认成功的继承调用可以复用结果。暂不实现无人确认自动续跑、跨进程执行权抢占或上下文压缩的跨文件提交 Checkpoint。恢复不等于精确恢复中断时的程序指令位置，也不保证任意外部副作用只执行一次。
 
 ## 阅读顺序
 
@@ -292,20 +292,24 @@ Plan-and-Execute Resume 收到 Unknown 调用
 
 核查能力作为 Tool 的可选 Verify 字段绑定在注册项上，RegisterProvider、RegisterEnabledTools 和 Subset 均保留它。只通过 RegisterTool 注册的同名自定义处理器不会自动得到内置核查能力；MCP 工具也不会因与内置工具同名而获得内置核查能力。核查器只读文件，不调用实际写入 Handler，也不调用 LLM。
 
-`mcp__filesystem__write_file` 使用独立的核查器：仅当同一 MCP 服务端同时启用了 `read_text_file` 时，恢复流程才调用它读取原路径的完整文本，并与写入请求的 `content` 精确比较。匹配时保存当前内容的哈希与核查结论；缺失、MCP 读取失败或内容不匹配时保留不确定性，让 Worker 决定下一次尝试。该核查只绑定到注册名为 `filesystem` 的 MCP 服务端的 `write_file`，不会调用其写入工具，也不会借用本地内置 `write_file` 的文件权限或路径规则。
+Tool.ReadOnly 只标记已知的现场观察工具。恢复提示会对每个未确认调用区分“可重新查询”与“重复操作的安全性未获证明”；ReadOnly 工具的新调用不复用历史查询结果。自定义工具默认不被视为只读。`Verification.Retry` 只表示需要新尝试，不证明原操作可安全重复。`retry_allowed` 允许继续任务，不等于授权原样重跑旧调用；Worker 仍须根据现场决定。对任意命令或不提供幂等请求身份的 MCP，当前无法保证外部副作用恰好发生一次。
 
-`mcp__filesystem__create_directory` 仅在同一服务端同时启用 `get_file_info` 时核查。恢复时读取原路径的文件信息，明确得到 `isDirectory: true` 且 `isFile: false` 才确认目录已存在；缺失、类型不符或无法读取时保留不确定性，让 Worker 继续处理。MCP `edit_file` 暂不接自动核查；Unknown 时由恢复后的 Worker 查看当前文件，决定是否重新调用工具。
+内置文件工具另有执行时的版本检查：`read_file` 每页都返回整文件的 `full_file_sha256`。`edit_file` 必须传该值作为 `expected_hash`；`write_file` 和 `create_project` 覆盖已有文件时也分别要求目标文件的预期哈希。工具在文件锁内核对当前内容，版本不符或缺少哈希就拒绝修改，Worker 需要重新读取后再决定如何修改；新建文件仍要求目标不存在。这与恢复时的 `Verify` 不同：预期哈希防止基于旧内容覆盖新版本，`Verify` 核查中断调用的后置条件。锁只协调本进程内的内置文件工具，外部进程或 MCP 写入不受此锁约束，因此这里不宣称跨进程原子性或恰好执行一次。
 
-内置 `read_file`、`list_dir` 和 filesystem MCP 的 `read_text_file`、`list_directory`、`get_file_info` 是现场观察。恢复后 Worker 再次请求这些工具时，旧 Run 即使已记录成功结果，也不复用；新调用重新读取当前状态。旧日志中已记录的 `ReusedFrom` 仍可重放。
+内置 `write_file` 与 `create_project` 执行时，如果已有文件内容已符合请求，直接返回成功，不再写入，也不要求覆盖权限或旧预期哈希仍匹配；只有内容不同、需要实际覆盖时才检查这两个条件。
 
-MCP `brave_web_search` 和 `fetch` 同样不复用旧查询结果；恢复后 Worker 再次请求时重新查询。MCP `shell_execute` 和 `edit_file` 没有统一后置条件核查器，Unknown 保持不确定并交给恢复后的 Worker 检查现场、决定下一步。
+内置 `write_file`、`edit_file`、`create_project` 的实际文件写入共用 `atomicWriteFile`：在目标目录写临时文件，Sync 并关闭后替换目标，再 Sync 目录。替换前失败保留旧文件；新建使用不覆盖已有目标的发布方式。正常错误会清理临时文件，进程被强杀可能留下 `.catcli-write-*` 临时文件。已有文件保留普通权限位，但替换会改变 inode，不保留原所有者、扩展属性或硬链接共享关系；已打开的旧句柄仍指向旧内容。`create_project` 只保证每个文件单独发布，不保证多个文件整体原子提交；外部写入者仍可能在版本检查后修改目标。
+
+当前 MCP 配置仅保留 Brave 网页搜索与 Fetch 网页抓取；文件和命令操作统一使用内置工具。filesystem、shell MCP 的专用核查与适配保护已移除。
+
+内置 `read_file`、`list_dir` 以及 MCP `brave_web_search`、`fetch` 是现场观察。恢复后 Worker 再次请求时不复用旧查询结果，而是重新查询当前状态。旧日志中已记录的 `ReusedFrom` 仍可重放，但已移除的 MCP 工具不会因此重新启用。
 
 其余内置工具按下面的规则处理：
 
 | 工具 | Verify 的处理 | 恢复决策 |
 | --- | --- | --- |
 | edit_file | 调用开始前准备修改前后完整文件哈希，恢复时比较预期后哈希，并核对路径和参数身份 | 完整匹配才复用；无证据、缺失或不匹配则新尝试 |
-| create_project | 逐一比较所有请求文件的完整内容，检查相对路径、工作区边界及符号链接；部分存在不能算完成 | 全部匹配才复用，否则 Worker 修复剩余文件 |
+| create_project | 逐一比较所有请求文件的完整内容，检查相对路径、工作区边界及符号链接；部分存在不能算完成 | 全部匹配才复用，否则 Worker 修复剩余文件；再次执行时跳过内容已匹配的文件，不要求覆盖权限或旧预期哈希仍匹配，内容不同的文件仍检查覆盖权限和预期版本 |
 | read_file / list_dir | 返回 Retry=true，要求重新读取，不在核查器中执行读取 Handler | retry_allowed，新调用获取当前结果 |
 | execute_command | 返回 Retry=true，说明任意命令没有统一后置条件；核查器不执行命令 | retry_allowed，Worker 通过正常权限流程决定新命令 |
 

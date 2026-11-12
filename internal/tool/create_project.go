@@ -69,7 +69,7 @@ func CreateProjectDefinition() Definition {
 		Type: "function",
 		FunctionDefinition: FunctionDefinition{
 			Name:        "create_project",
-			Description: "根据文件列表创建一个项目结构，包括目录和文件。默认不覆盖已有文件。",
+			Description: "根据文件列表创建项目。已有文件内容与目标相同时跳过并视为成功。内容不同时默认不覆盖；覆盖必须提供该文件最近读取的 expected_hash，哈希变化时先重新读取。",
 			Parameters: map[string]interface{}{
 				"type": "object",
 				"properties": map[string]interface{}{
@@ -90,6 +90,10 @@ func CreateProjectDefinition() Definition {
 								"content": map[string]interface{}{
 									"type":        "string",
 									"description": "文件内容",
+								},
+								"expected_hash": map[string]interface{}{
+									"type":        "string",
+									"description": "覆盖已有文件时必填：该文件最近读取的 full_file_sha256；新建文件不填",
 								},
 							},
 							"required": []string{"path", "content"},
@@ -159,16 +163,20 @@ func CreateProjectHandler(
 		if !ok {
 			return "", fmt.Errorf("file content is required")
 		}
+		expected, err := expectedFileHash(fileMap)
+		if err != nil {
+			return "", err
+		}
 
 		fullPath := filepath.Join(root, cleanRelativePath)
-		if err := writeProjectFile(ctx, fullPath, content, overwrite); err != nil {
+		if err := writeProjectFile(ctx, fullPath, content, overwrite, expected); err != nil {
 			return "", err
 		}
 
 		createdFiles++
 	}
 
-	return fmt.Sprintf("create_project completed, wrote %d file(s) under %s", createdFiles, root), nil
+	return fmt.Sprintf("create_project completed, ensured %d file(s) match requested content under %s", createdFiles, root), nil
 }
 
 func writeProjectFile(
@@ -176,6 +184,7 @@ func writeProjectFile(
 	fullPath string,
 	content string,
 	overwrite bool,
+	expected string,
 ) error {
 	unlock := fileLocks.lock(fullPath)
 	defer unlock()
@@ -183,13 +192,39 @@ func writeProjectFile(
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	if _, err := os.Stat(fullPath); err == nil && !overwrite {
-		return fmt.Errorf("file already exists: %s", fullPath)
-	} else if err != nil && !os.IsNotExist(err) {
+	info, err := os.Stat(fullPath)
+	switch {
+	case err == nil:
+		if !info.Mode().IsRegular() {
+			return fmt.Errorf("expected a regular file: %s", fullPath)
+		}
+		actual, err := fileSHA256(ctx, fullPath)
+		if err != nil {
+			return err
+		}
+		// The requested state already exists, including after a partial prior run.
+		// No overwrite permission or still-current pre-edit hash is needed to skip.
+		if actual == contentHash([]byte(content)) {
+			return nil
+		}
+		if !overwrite {
+			return fmt.Errorf("file already exists with different content: %s", fullPath)
+		}
+		if expected == "" {
+			return fmt.Errorf("expected_hash is required to overwrite an existing file; read %s first", fullPath)
+		}
+		if actual != expected {
+			return fmt.Errorf("file changed since read: expected_hash does not match; read %s again", fullPath)
+		}
+	case os.IsNotExist(err):
+		if expected != "" {
+			return fmt.Errorf("file is missing: expected_hash requires an existing file; read %s again", fullPath)
+		}
+	case err != nil:
 		return err
 	}
 	if err := os.MkdirAll(filepath.Dir(fullPath), 0755); err != nil {
 		return err
 	}
-	return os.WriteFile(fullPath, []byte(content), 0644)
+	return atomicWriteFile(ctx, fullPath, []byte(content), info == nil)
 }

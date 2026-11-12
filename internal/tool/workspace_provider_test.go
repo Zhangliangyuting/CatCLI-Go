@@ -28,7 +28,7 @@ func TestBuiltinProviderBindsFileToolsToWorkspace(t *testing.T) {
 		t.Fatalf("WriteFile() error = %v", err)
 	}
 	result, err := registry.Execute(context.Background(), "read_file", map[string]interface{}{"path": "inside.txt"})
-	if err != nil || result != "inside" {
+	if err != nil || result != "[catcli: full_file_sha256="+contentHash([]byte("inside"))+"]\ninside" {
 		t.Fatalf("read_file result/error = %q/%v", result, err)
 	}
 

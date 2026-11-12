@@ -1,7 +1,7 @@
 # MCP 接入与阅读顺序
 
 CatCLI 作为 MCP Client 连接外部 Server，将发现的工具注册到现有 ToolRegistry。
-ReAct Agent 和 Plan-and-Execute 的 Worker 共用这份工具集合；Reviewer 优先使用 `filesystem` Server 的只读目录和文本读取工具，缺失时按操作回退到内置只读工具。
+ReAct Agent 和 Plan-and-Execute 的 Worker 共用这份工具集合；Reviewer 使用内置的 `list_dir` 和 `read_file`，文件和命令操作统一由内置工具提供。
 
 推荐按下面的顺序读，先理解一条调用链，再研究并发和故障处理：
 
@@ -62,24 +62,11 @@ mcp:
 
 配置中的 `${VARIABLE}` 在 JSON 解码后展开，支持命令、参数、工作目录、环境变量和 HTTP Header。变量必须已存在于环境中（CLI 会先加载 `.env`）；禁用的 Server 不展开变量。`config/mcp.json` 已加入 Git 忽略规则。
 
-### 与内置工具对应的 Server
+### 接入范围
 
-[Filesystem MCP](https://github.com/modelcontextprotocol/servers/tree/main/src/filesystem) 使用 `npx -y @modelcontextprotocol/server-filesystem@2.1.0 .` 启动，需要 Node.js 24 或以上；[Shell MCP](https://github.com/tumf/mcp-shell-server) 使用 `uvx mcp-shell-server==1.1.14` 启动，需要 uv 和 Python 3.11 或以上。它们都是本地 stdio 子进程，不需要 API Key。
+当前配置和示例只保留 Brave 网页搜索与 Fetch 网页抓取。文件读取、编辑、写入、项目创建和命令执行统一使用内置工具，不再配置 filesystem 或 shell MCP。
 
-| 内置工具 | Server | 对应的原始 MCP 工具名 |
-| --- | --- | --- |
-| `list_dir` | filesystem | `list_directory` |
-| `read_file` | filesystem | `read_text_file` |
-| `edit_file` | filesystem | `edit_file` |
-| `write_file` | filesystem | `write_file` |
-| `create_project` | filesystem | 组合调用 `create_directory` 和 `write_file`，没有相同的单个工具 |
-| `execute_command` | shell | `shell_execute`，当前仅允许 `pwd`、`ls` |
-
-两个 stdio 配置的 `cwd: ".."` 都指向 JSON 文件上一级目录，即当前仓库根目录。Filesystem 的参数 `.` 在这个工作目录中解析，将文件访问范围限制在仓库内；Shell 的 `cwd` 只指定启动目录，不限制命令访问其他路径。Shell 的程序名白名单也不等于内置工具的参数校验，因此 Go 命令继续使用内置 `execute_command`，不要为了测试而直接放开所有命令。
-
-注册后名称为 `mcp__filesystem__read_text_file`、`mcp__shell__shell_execute` 等。内置工具继续保留，MCP 配置不会替换它们。参数要遵循外部 Server 的 schema，例如 Filesystem 写文件使用 `path`，编辑使用 `edits: [{oldText, newText}]`；其 `write_file` 会覆盖已有文件，没有内置工具的 `overwrite` 开关。
-
-初次启动 `npx` / `uvx` 会下载固定版本包，后续复用本地缓存。示例为冷启动保留了 `120s` 超时；该值也适用于单次 RPC，Shell 内部另外将命令执行时间限制为默认 10 秒、最多 30 秒。
+通用 MCP 传输和工具发现能力仍然保留。初次启动 `npx` / `uvx` 会下载固定版本包，后续复用本地缓存；示例保留 `120s` 启动与请求超时。
 
 ### 网页搜索与读取
 
@@ -461,7 +448,7 @@ ToolRegistry.RegisterProvider(manager)
 退出 → manager.Close()
 ```
 
-第一遍只需要确认：MCP 工具在创建 Agent 前注册，后续通过已有工具调用流程执行。`cmd/catcli/reviewer_tools.go` 为 Reviewer 优先选择 `mcp__filesystem__list_directory` 和 `mcp__filesystem__read_text_file`，缺失时分别回退到 `list_dir` 和 `read_file`。它不会获得写文件、编辑或 Shell 工具；如果更改配置中的 Server 名称，也需要同步这里的明确白名单。
+第一遍只需要确认：MCP 工具在创建 Agent 前注册，后续通过已有工具调用流程执行。`cmd/catcli/reviewer_tools.go` 为 Reviewer 仅选择内置 `list_dir` 和 `read_file`。它不会获得写文件、编辑或命令工具。
 
 如果想继续追踪执行过程，再看：
 

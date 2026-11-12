@@ -34,7 +34,7 @@ func ToolName(server, name string) string {
 	return clean + "_" + hex.EncodeToString(digest[:8])
 }
 
-func adaptTool(server string, descriptor ToolDescriptor, client *Client, available map[string]bool) tool.Tool {
+func adaptTool(server string, descriptor ToolDescriptor, client *Client) tool.Tool {
 	adapted := tool.Tool{
 		Definition: tool.Definition{Type: "function", FunctionDefinition: tool.FunctionDefinition{
 			Name:        ToolName(server, descriptor.Name),
@@ -56,15 +56,13 @@ func adaptTool(server string, descriptor ToolDescriptor, client *Client, availab
 			return string(encoded), nil
 		},
 	}
-	if server == "filesystem" && descriptor.Name == "write_file" && available["read_text_file"] {
-		adapted.Verify = func(ctx context.Context, args map[string]any, _ string) (*tool.Verification, error) {
-			return verifyFilesystemWrite(ctx, client, args)
-		}
-	}
-	if server == "filesystem" && descriptor.Name == "create_directory" && available["get_file_info"] {
-		adapted.Verify = func(ctx context.Context, args map[string]any, _ string) (*tool.Verification, error) {
-			return verifyFilesystemDirectory(ctx, client, args)
-		}
+	// Only known observation tools receive this property. Names of custom MCP
+	// servers or other operations cannot establish retry safety on their own.
+	switch server {
+	case "brave":
+		adapted.ReadOnly = descriptor.Name == "brave_web_search"
+	case "fetch":
+		adapted.ReadOnly = descriptor.Name == "fetch"
 	}
 	return adapted
 }

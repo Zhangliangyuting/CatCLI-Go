@@ -8,6 +8,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 )
 
 type runRecorderKey struct{}
@@ -43,8 +44,10 @@ func startToolCallRecording(ctx context.Context, tools *tool.ToolRegistry, call 
 	if binding.run != nil {
 		ref := binding.ref
 		data.Task = &ref
-		if source, savedResult, ok := binding.run.ReusableToolResult(ref, data.ToolName, data.Arguments); ok && !binding.freshTools[data.ToolName] {
-			data.ReusedFrom, result = source, savedResult
+		if !tools.IsReadOnly(data.ToolName) && !binding.freshTools[data.ToolName] {
+			if source, savedResult, ok := binding.run.ReusableToolResult(ref, data.ToolName, data.Arguments); ok {
+				data.ReusedFrom, result = source, savedResult
+			}
 		}
 	}
 	if binding.run != nil && data.ReusedFrom == "" {
@@ -151,10 +154,11 @@ func restorePlan(run *executionlog.RunRecorder) (*plan.Plan, error) {
 	return p, nil
 }
 
-func taskRecoveryContext(calls []executionlog.CallState, taskID string, revision uint64) string {
+func taskRecoveryContext(calls []executionlog.CallState, taskID string, revision uint64, tools *tool.ToolRegistry) string {
 	// Only this task's execution evidence is given to its new Worker. Bound the
 	// model context independently from the complete authoritative disk log.
 	var evidence []executionlog.CallState
+	var retryGuidance []string
 	budget := 16000
 	for _, call := range calls {
 		if call.Task == nil || call.Task.TaskID != taskID || call.Task.Revision != revision || call.Task.Phase == "reviewer" {
@@ -184,6 +188,13 @@ func taskRecoveryContext(calls []executionlog.CallState, taskID string, revision
 		// the conclusion needed by the Worker.
 		call.Reconciliation = nil
 		call.VerificationData = "" // Full hashes stay on disk; not model instructions.
+		if call.Status == executionlog.RetryAllowed || call.Status == executionlog.Unknown {
+			if tools.IsReadOnly(call.ToolName) {
+				retryGuidance = append(retryGuidance, fmt.Sprintf("%q (%q): 只读调用，可重新查询当前状态；旧结果不能复用。", call.CallID, call.ToolName))
+			} else {
+				retryGuidance = append(retryGuidance, fmt.Sprintf("%q (%q): 重复操作的安全性未获证明；先核查现场，再决定是否需要新操作。", call.CallID, call.ToolName))
+			}
+		}
 		evidence = append(evidence, call)
 	}
 	data, _ := json.Marshal(evidence)
@@ -196,6 +207,8 @@ func taskRecoveryContext(calls []executionlog.CallState, taskID string, revision
 3. 如果目标尚未满足，选择合适的方法补齐或修复，不必沿用原来的工具调用顺序。
 4. 如果无法核实，只有在重复调用不会造成不希望的额外影响，或操作具备幂等性时，才直接重试；否则先寻找其他核实或修复方式，仍无法判断时报告不确定性。
 所有新调用仍使用正常工具和权限流程；不要把旧调用的不确定结果当成成功，也不要因此直接放弃整个任务。
+各调用的重试提示：
+` + strings.Join(retryGuidance, "\n") + `
 历史调用：
 ` + string(data)
 }
