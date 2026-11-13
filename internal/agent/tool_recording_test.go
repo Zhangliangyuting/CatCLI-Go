@@ -90,6 +90,12 @@ func TestReActDirectToolExecutionRecording(t *testing.T) {
 				if runErr != nil || answer != "done" || run.Status != execution.Completed || *requests != 2 {
 					t.Fatalf("answer=%q error=%v run=%+v requests=%d", answer, runErr, run, *requests)
 				}
+				if mode == "invalid arguments" {
+					if len(run.Calls) != 0 {
+						t.Fatalf("malformed tool call was recorded as started: %+v", run.Calls)
+					}
+					return
+				}
 				if len(run.Calls) != 1 || run.Calls[0].Status != execution.Returned {
 					t.Fatalf("missing returned call: %+v", run)
 				}

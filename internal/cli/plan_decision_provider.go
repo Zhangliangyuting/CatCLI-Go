@@ -3,7 +3,6 @@ package cli
 import (
 	"AgentCLI/internal/agent/multiagent"
 	"AgentCLI/internal/plan"
-	"bufio"
 	"fmt"
 	"strings"
 )
@@ -11,12 +10,12 @@ import (
 // CLIPlanDecisionProvider collects the user's execute, revise, or cancel
 // decision from the command line before a generated plan starts.
 type CLIPlanDecisionProvider struct {
-	reader *bufio.Reader
+	reader interface{ ReadString(byte) (string, error) }
 }
 
 var _ multiagent.PlanDecisionProvider = (*CLIPlanDecisionProvider)(nil)
 
-func NewCLIPlanDecisionProvider(reader *bufio.Reader) *CLIPlanDecisionProvider {
+func NewCLIPlanDecisionProvider(reader interface{ ReadString(byte) (string, error) }) *CLIPlanDecisionProvider {
 	return &CLIPlanDecisionProvider{reader: reader}
 }
 

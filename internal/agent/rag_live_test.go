@@ -15,7 +15,6 @@ import (
 	"AgentCLI/internal/llm"
 	"AgentCLI/internal/memory"
 	"AgentCLI/internal/rag"
-	"AgentCLI/internal/tool"
 	"AgentCLI/internal/workspace"
 )
 
@@ -102,7 +101,7 @@ func TestLiveWorkspaceRAG(t *testing.T) {
 	}
 	t.Log("real query embedding and retrieval verified")
 	// No file tools: the model must obtain the random answer from RAG context.
-	agent := NewReActAgent(client, tool.NewToolRegistry(), WithRAGContext(provider))
+	agent := NewReActAgent(client, newApprovedTestRegistry(), WithRAGContext(provider))
 	answer, err := agent.Run(ctx, query)
 	if err != nil {
 		t.Fatalf("live chat: %v", err)

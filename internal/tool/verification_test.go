@@ -17,7 +17,7 @@ func verificationRegistry(t *testing.T) (*ToolRegistry, string) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	r := NewToolRegistry()
+	r := newApprovedTestRegistry()
 	r.RegisterProvider(NewBuiltinProvider(work))
 	return r, root
 }
@@ -58,7 +58,11 @@ func TestEditFileVerificationUsesPreparedFullFileHash(t *testing.T) {
 				t.Fatal(err)
 			}
 			args := map[string]any{"file_path": "file", "old_string": tc.old, "new_string": tc.replacement, "replace_all": tc.all, "expected_hash": contentHash([]byte(tc.before))}
-			proof, err := r.PrepareVerification(t.Context(), "edit_file", args)
+			approved, err := r.Authorize(t.Context(), "edit_file", args)
+			if err != nil {
+				t.Fatal(err)
+			}
+			proof, err := approved.PrepareVerification(t.Context())
 			if err != nil || proof == "" {
 				t.Fatalf("prepare: %q %v", proof, err)
 			}
@@ -67,7 +71,7 @@ func TestEditFileVerificationUsesPreparedFullFileHash(t *testing.T) {
 					t.Fatalf("unedited file accepted: %+v %v", check, err)
 				}
 			}
-			if _, err := r.Execute(t.Context(), "edit_file", args); err != nil {
+			if _, err := approved.Execute(t.Context()); err != nil {
 				t.Fatal(err)
 			}
 			check, err := r.Verify(t.Context(), "edit_file", args, proof)
@@ -109,8 +113,13 @@ func TestEditVerificationRejectsInvalidPreparationAndEscape(t *testing.T) {
 		{"file_path": "file", "old_string": "missing", "new_string": "new"},
 		{"file_path": "file", "old_string": ""},
 	} {
-		if data, err := r.PrepareVerification(t.Context(), "edit_file", args); err == nil || data != "" {
-			t.Fatalf("invalid preparation accepted: %q %v", data, err)
+		approved, err := r.Authorize(t.Context(), "edit_file", args)
+		proof := ""
+		if err == nil {
+			proof, err = approved.PrepareVerification(t.Context())
+		}
+		if err == nil {
+			t.Fatalf("invalid preparation accepted: %q %v", proof, err)
 		}
 	}
 }

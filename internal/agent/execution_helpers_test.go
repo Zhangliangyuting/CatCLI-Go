@@ -49,7 +49,7 @@ func newLoggedTestAgent(t *testing.T, store execution.EventStore, handler tool.H
 			Body:       io.NopCloser(strings.NewReader(string(data))),
 		}, nil
 	})}
-	registry := tool.NewToolRegistry()
+	registry := newApprovedTestRegistry()
 	registry.RegisterTool(tool.Definition{
 		Type: "function",
 		FunctionDefinition: tool.FunctionDefinition{

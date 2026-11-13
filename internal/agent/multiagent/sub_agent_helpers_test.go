@@ -3,7 +3,6 @@ package multiagent
 import (
 	"AgentCLI/internal/llm"
 	"AgentCLI/internal/memory"
-	"AgentCLI/internal/tool"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -44,7 +43,7 @@ func newTestWorkerExecutor(
 	client, _ := newRecordedChatClient(t, workerResponse)
 	return newTaskExecutor(
 		client,
-		tool.NewToolRegistry(),
+		newApprovedTestRegistry(),
 		newTestMemoryRuntime(t, client),
 		reviewer,
 		nil,

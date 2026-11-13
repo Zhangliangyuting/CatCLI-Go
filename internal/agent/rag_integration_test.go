@@ -14,7 +14,6 @@ import (
 	"AgentCLI/internal/llm"
 	"AgentCLI/internal/memory"
 	"AgentCLI/internal/rag"
-	"AgentCLI/internal/tool"
 	"AgentCLI/internal/workspace"
 )
 
@@ -101,7 +100,7 @@ func TestReActAgentReceivesIndexedWorkspaceContext(t *testing.T) {
 	client := &llm.OpenAICompatibleClient{
 		APIKey: "test", BaseURL: "http://rag.integration", Model: "test-chat", HTTPClient: httpClient,
 	}
-	agent := NewReActAgent(client, tool.NewToolRegistry(), WithRAGContext(provider))
+	agent := NewReActAgent(client, newApprovedTestRegistry(), WithRAGContext(provider))
 	var reports []rag.RetrievalReport
 	ctx := WithObserver(context.Background(), func(event Event) {
 		if event.Type == EventWorkspaceRetrieval && event.WorkspaceRetrieval != nil {

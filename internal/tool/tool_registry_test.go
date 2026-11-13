@@ -7,7 +7,7 @@ import (
 )
 
 func TestToolRegistryPassesContextToHandler(t *testing.T) {
-	registry := NewToolRegistry()
+	registry := newApprovedTestRegistry()
 	registry.RegisterTool(Definition{
 		Type: "function",
 		FunctionDefinition: FunctionDefinition{
@@ -40,7 +40,7 @@ func TestExecuteCommandUsesParentContext(t *testing.T) {
 }
 
 func TestToolRegistrySubsetRestrictsTools(t *testing.T) {
-	registry := NewToolRegistry()
+	registry := newApprovedTestRegistry()
 	registry.RegisterTool(ReadFileDefinition(), ReadFileHandler)
 	registry.RegisterTool(WriteFileDefinition(), WriteFileHandler)
 
@@ -55,7 +55,7 @@ func TestToolRegistrySubsetRestrictsTools(t *testing.T) {
 }
 
 func TestReadOnlyRecoveryClassificationUsesRegisteredImplementation(t *testing.T) {
-	registry := NewToolRegistry()
+	registry := newApprovedTestRegistry()
 	registry.RegisterProvider(NewBuiltinProvider(nil))
 	if !registry.IsReadOnly("read_file") || !registry.IsReadOnly("list_dir") {
 		t.Fatal("built-in observations must be eligible for a fresh read")
@@ -65,7 +65,7 @@ func TestReadOnlyRecoveryClassificationUsesRegisteredImplementation(t *testing.T
 			t.Fatalf("%s was classified as a repeatable observation", name)
 		}
 	}
-	custom := NewToolRegistry()
+	custom := newApprovedTestRegistry()
 	custom.RegisterTool(ReadFileDefinition(), ReadFileHandler)
 	if custom.IsReadOnly("read_file") {
 		t.Fatal("custom handler inherited built-in retry classification by name")

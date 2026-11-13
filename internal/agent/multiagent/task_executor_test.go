@@ -1,7 +1,6 @@
 package multiagent
 
 import (
-	"AgentCLI/internal/tool"
 	"context"
 	"errors"
 	"strings"
@@ -11,7 +10,7 @@ import (
 func TestReviewingTaskExecutorApprovesResult(t *testing.T) {
 	execution := TaskExecution{TaskID: "task_1", Prompt: "implement"}
 	client, recording := newRecordedChatClient(t, `{"approved":true,"feedback":""}`)
-	reviewer, err := NewReviewerSubAgent(client, tool.NewToolRegistry())
+	reviewer, err := NewReviewerSubAgent(client, newApprovedTestRegistry())
 	if err != nil {
 		t.Fatalf("NewReviewerSubAgent() error = %v", err)
 	}
@@ -33,7 +32,7 @@ func TestReviewingTaskExecutorApprovesResult(t *testing.T) {
 
 func TestReviewingTaskExecutorRejectsResult(t *testing.T) {
 	client, _ := newRecordedChatClient(t, `{"approved":false,"feedback":"tests are missing"}`)
-	reviewer, err := NewReviewerSubAgent(client, tool.NewToolRegistry())
+	reviewer, err := NewReviewerSubAgent(client, newApprovedTestRegistry())
 	if err != nil {
 		t.Fatalf("NewReviewerSubAgent() error = %v", err)
 	}
@@ -51,7 +50,7 @@ func TestReviewingTaskExecutorRejectsResult(t *testing.T) {
 
 func TestReviewingTaskExecutorSkipsReviewAfterExecutionError(t *testing.T) {
 	client, recording := newRecordedChatClient(t, `{"approved":true,"feedback":""}`)
-	reviewer, err := NewReviewerSubAgent(client, tool.NewToolRegistry())
+	reviewer, err := NewReviewerSubAgent(client, newApprovedTestRegistry())
 	if err != nil {
 		t.Fatalf("NewReviewerSubAgent() error = %v", err)
 	}

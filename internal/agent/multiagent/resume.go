@@ -4,6 +4,7 @@ import (
 	executionlog "AgentCLI/internal/execution"
 	"AgentCLI/internal/llm"
 	"AgentCLI/internal/memory"
+	"AgentCLI/internal/tool"
 	"context"
 	"encoding/json"
 	"errors"
@@ -47,6 +48,9 @@ func (a *PlanAndExecuteAgent) Resume(ctx context.Context, selected executionlog.
 			check, checkErr := a.executor.tools.Verify(ctx, call.ToolName, args, call.VerificationData)
 			if err := ctx.Err(); err != nil {
 				return "", err
+			}
+			if errors.Is(checkErr, tool.ErrPermissionDenied) {
+				return "", checkErr
 			}
 			if checkErr != nil {
 				decision.Evidence += "; verification failed: " + checkErr.Error()

@@ -217,33 +217,48 @@ func (a *ReActAgent) run(
 				Content: toolCall.Function.Arguments,
 			})
 
-			var verificationData string
-			if recorder != nil {
-				var args map[string]any
-				if json.Unmarshal([]byte(toolCall.Function.Arguments), &args) == nil {
-					verificationData, _ = a.tools.PrepareVerification(ctx, toolCall.Function.Name, args)
-				}
-			}
-			call, err := recorder.StartToolCall(ctx, execution.ToolCallEventData{
-				ToolCallID: toolCall.ID, ToolName: toolCall.Function.Name, Arguments: toolCall.Function.Arguments,
-				VerificationData: verificationData,
-			})
-			if err != nil {
-				return "", err
-			}
 			var args map[string]any
 			var toolResult string
 			var toolErr error
-			if err := json.Unmarshal([]byte(call.Arguments), &args); err != nil {
+			var approved *tool.AuthorizedCall
+			if err := json.Unmarshal([]byte(toolCall.Function.Arguments), &args); err != nil {
 				toolErr = fmt.Errorf("invalid tool arguments: %w", err)
 			} else {
-				toolResult, toolErr = a.tools.Execute(ctx, call.ToolName, args)
+				approved, toolErr = a.tools.Authorize(ctx, toolCall.Function.Name, args)
 			}
-			if toolErr != nil {
-				toolResult = "ERROR: " + toolErr.Error()
-			}
-			if err := recorder.CompleteToolCall(ctx, call.CallID, toolResult, toolErr); err != nil {
+			if err := ctx.Err(); err != nil {
 				return "", err
+			}
+			if toolErr == nil {
+				var verificationData string
+				if recorder != nil {
+					verificationData, _ = approved.PrepareVerification(ctx)
+				}
+				if err := ctx.Err(); err != nil {
+					return "", err
+				}
+				var call execution.ToolCallEventData
+				if recorder != nil {
+					call, err = recorder.StartToolCall(ctx, execution.ToolCallEventData{
+						ToolCallID: toolCall.ID, ToolName: toolCall.Function.Name, Arguments: toolCall.Function.Arguments,
+						VerificationData: verificationData,
+					})
+					if err != nil {
+						return "", err
+					}
+				}
+				toolResult, toolErr = approved.Execute(ctx)
+				if toolErr != nil {
+					toolResult = "ERROR: " + toolErr.Error()
+				}
+				if recorder != nil {
+					if err := recorder.CompleteToolCall(ctx, call.CallID, toolResult, toolErr); err != nil {
+						return "", err
+					}
+				}
+			} else {
+				// Rejected requests are feedback to the model, not started executions.
+				toolResult = "ERROR: " + toolErr.Error()
 			}
 
 			Emit(ctx, Event{

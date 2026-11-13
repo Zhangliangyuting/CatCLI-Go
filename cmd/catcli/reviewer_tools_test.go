@@ -20,7 +20,7 @@ func TestSelectReviewerTools(t *testing.T) {
 		{"empty", nil, nil},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			registry := tool.NewToolRegistry()
+			registry := newApprovedTestRegistry()
 			for _, name := range tc.available {
 				registry.RegisterTool(tool.Definition{FunctionDefinition: tool.FunctionDefinition{Name: name}}, func(context.Context, map[string]any) (string, error) { return "ok", nil })
 			}

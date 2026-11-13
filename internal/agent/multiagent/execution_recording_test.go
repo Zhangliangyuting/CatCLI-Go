@@ -8,7 +8,7 @@ import (
 )
 
 func TestRecoveryPromptDistinguishesFreshReadFromUncertainMutation(t *testing.T) {
-	registry := tool.NewToolRegistry()
+	registry := newApprovedTestRegistry()
 	registry.RegisterProvider(tool.NewBuiltinProvider(nil))
 	ref := &executionlog.TaskReference{Revision: 1, TaskID: "task", Attempt: 1, Phase: "worker"}
 	calls := []executionlog.CallState{

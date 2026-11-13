@@ -36,6 +36,7 @@ func ToolName(server, name string) string {
 
 func adaptTool(server string, descriptor ToolDescriptor, client *Client) tool.Tool {
 	adapted := tool.Tool{
+		Permission: tool.Ask,
 		Definition: tool.Definition{Type: "function", FunctionDefinition: tool.FunctionDefinition{
 			Name:        ToolName(server, descriptor.Name),
 			Description: descriptor.Description,

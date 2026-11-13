@@ -24,6 +24,8 @@ type Handler func(
 type Tool struct {
 	Definition Definition
 	Handler    Handler
+	// Permission declares the default access for an execution. Empty means Ask.
+	Permission PermissionAction
 	// ReadOnly permits a fresh observation after recovery. It does not make a
 	// previous result reusable, because the external state may have changed.
 	ReadOnly bool
@@ -52,12 +54,14 @@ type Verification struct {
 }
 
 type ToolRegistry struct {
-	tools map[string]Tool
+	tools       map[string]Tool
+	permissions *permissionGate
 }
 
 func NewToolRegistry() *ToolRegistry {
 	return &ToolRegistry{
-		tools: make(map[string]Tool),
+		tools:       make(map[string]Tool),
+		permissions: &permissionGate{prompt: make(chan struct{}, 1)},
 	}
 }
 
@@ -90,21 +94,7 @@ func (r *ToolRegistry) Verify(ctx context.Context, name string, args map[string]
 	if !ok || t.Verify == nil {
 		return nil, nil
 	}
-	return t.Verify(ctx, args, data)
-}
-
-func (r *ToolRegistry) PrepareVerification(ctx context.Context, name string, args map[string]any) (string, error) {
-	if err := ctx.Err(); err != nil {
-		return "", err
-	}
-	if r == nil {
-		return "", nil
-	}
-	t, ok := r.tools[name]
-	if !ok || t.PrepareVerification == nil {
-		return "", nil
-	}
-	return t.PrepareVerification(ctx, args)
+	return t.Verify(ctx, copyPermissionArguments(args), data)
 }
 
 func (r *ToolRegistry) Execute(
@@ -112,12 +102,11 @@ func (r *ToolRegistry) Execute(
 	name string,
 	args map[string]interface{},
 ) (string, error) {
-	toolDef, exists := r.tools[name]
-	if !exists {
-		return "", fmt.Errorf("tool not found: %s", name)
+	approved, err := r.Authorize(ctx, name, args)
+	if err != nil {
+		return "", err
 	}
-
-	return toolDef.Handler(ctx, args)
+	return approved.Execute(ctx)
 }
 
 func (r *ToolRegistry) ToolDefinitions() []Definition {
@@ -137,6 +126,7 @@ func (r *ToolRegistry) Subset(names ...string) *ToolRegistry {
 	if r == nil {
 		return subset
 	}
+	subset.permissions = r.permissions
 	for _, name := range names {
 		if registered, exists := r.tools[name]; exists {
 			subset.tools[name] = registered

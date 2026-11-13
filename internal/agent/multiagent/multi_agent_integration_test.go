@@ -80,7 +80,7 @@ func TestMultiAgentPlannerWorkerReviewerFlow(t *testing.T) {
 		Model:      "test-model",
 		HTTPClient: server.Client(),
 	}
-	registry := tool.NewToolRegistry()
+	registry := newApprovedTestRegistry()
 	readCalls := 0
 	registry.RegisterTool(tool.ReadFileDefinition(), func(context.Context, map[string]interface{}) (string, error) {
 		readCalls++

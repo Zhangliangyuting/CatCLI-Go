@@ -77,7 +77,7 @@ mcp:
 
 典型调用：`brave_web_search({"query":"Go context cancellation"})` 搜索链接，再用 `fetch({"url":"https://example.com","max_length":3000})` 读取选中网页正文。两者复用现有 ToolRegistry 和工具调用 Observer，Reviewer 的只读文件工具白名单不变。
 
-`tools` 省略时暴露 Server 的全部工具，`[]` 表示不暴露工具；填写数组则仅注册指定的原始工具名，找不到指定工具时该 Server 启动失败。`tools.enabled` 仍只控制原有 Provider 的工具。外部 MCP 工具的权限由对应 Server 决定，不受内置文件工具的 Workspace 路径校验约束。
+`tools` 省略时暴露 Server 的全部工具，`[]` 表示不暴露工具；填写数组则仅注册指定的原始工具名，找不到指定工具时该 Server 启动失败。`tools.enabled` 仍只控制原有 Provider 的工具。外部 MCP 工具与内置工具共用 Registry 的执行前权限入口，当前每次外部调用都需要用户确认。确认后 Server 仍执行自己的权限检查；MCP 不受内置文件工具的 Workspace 路径校验约束，CLI 确认也不是远端沙箱。
 
 启动输出示例：
 

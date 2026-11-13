@@ -35,9 +35,9 @@ func recordTask(ctx context.Context, run *executionlog.RunRecorder, typ executio
 	return nil
 }
 
-// startToolCallRecording prepares the event and records its start without executing a tool.
+// toolCallRecordingData assembles event data and checks historical result reuse.
 // A nonempty ReusedFrom identifies the saved result returned alongside the event data.
-func startToolCallRecording(ctx context.Context, tools *tool.ToolRegistry, call llm.ToolCall) (executionlog.ToolCallEventData, string, error) {
+func toolCallRecordingData(ctx context.Context, tools *tool.ToolRegistry, call llm.ToolCall) (executionlog.ToolCallEventData, string) {
 	binding, _ := ctx.Value(toolRecordingKey{}).(taskToolRecording)
 	data := executionlog.ToolCallEventData{ToolCallID: call.ID, ToolName: call.Function.Name, Arguments: call.Function.Arguments}
 	var result string
@@ -50,22 +50,26 @@ func startToolCallRecording(ctx context.Context, tools *tool.ToolRegistry, call 
 			}
 		}
 	}
-	if binding.run != nil && data.ReusedFrom == "" {
-		var args map[string]any
-		if json.Unmarshal([]byte(data.Arguments), &args) == nil {
-			// Missing evidence must not prevent the normal tool error/result path.
-			data.VerificationData, _ = tools.PrepareVerification(ctx, data.ToolName, args)
-		}
+	return data, result
+}
+
+func startToolCallRecording(ctx context.Context, data executionlog.ToolCallEventData) (executionlog.ToolCallEventData, error) {
+	binding, _ := ctx.Value(toolRecordingKey{}).(taskToolRecording)
+	if binding.run == nil {
+		return data, nil
 	}
 	data, err := binding.run.StartToolCall(ctx, data)
 	if err != nil {
-		return executionlog.ToolCallEventData{}, "", &recordingError{err}
+		return executionlog.ToolCallEventData{}, &recordingError{err}
 	}
-	return data, result, nil
+	return data, nil
 }
 
 func completeToolCallRecording(ctx context.Context, callID, result string, toolErr error) error {
 	binding, _ := ctx.Value(toolRecordingKey{}).(taskToolRecording)
+	if binding.run == nil {
+		return nil
+	}
 	if err := binding.run.CompleteToolCall(ctx, callID, result, toolErr); err != nil {
 		return &recordingError{err}
 	}

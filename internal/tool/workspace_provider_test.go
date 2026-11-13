@@ -16,7 +16,7 @@ func TestBuiltinProviderBindsFileToolsToWorkspace(t *testing.T) {
 	if err != nil {
 		t.Fatalf("workspace.New() error = %v", err)
 	}
-	registry := NewToolRegistry()
+	registry := newApprovedTestRegistry()
 	if err := registry.RegisterEnabledTools(
 		[]Provider{NewBuiltinProvider(currentWorkspace)},
 		[]string{"read_file", "write_file", "list_dir"},
@@ -60,7 +60,7 @@ func TestBuiltinProviderRunsCommandsFromWorkspaceRoot(t *testing.T) {
 	if err != nil {
 		t.Fatalf("workspace.New() error = %v", err)
 	}
-	registry := NewToolRegistry()
+	registry := newApprovedTestRegistry()
 	if err := registry.RegisterEnabledTools(
 		[]Provider{NewBuiltinProvider(currentWorkspace)},
 		[]string{"execute_command"},
@@ -90,7 +90,7 @@ func TestBuiltinProviderRejectsCreateProjectSymlinkEscape(t *testing.T) {
 	if err != nil {
 		t.Fatalf("workspace.New() error = %v", err)
 	}
-	registry := NewToolRegistry()
+	registry := newApprovedTestRegistry()
 	if err := registry.RegisterEnabledTools(
 		[]Provider{NewBuiltinProvider(currentWorkspace)},
 		[]string{"create_project"},

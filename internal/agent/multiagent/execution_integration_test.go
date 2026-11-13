@@ -97,7 +97,7 @@ func newExecutionFixture(t *testing.T) *workflowTestFixture {
 	}
 	f.store = store
 	f.recorder = executionlog.NewRecorder(store, runtime.RootContext().ConversationID)
-	registry := tool.NewToolRegistry()
+	registry := newApprovedTestRegistry()
 	register := func(name string, handler tool.Handler) {
 		registry.RegisterTool(tool.Definition{Type: "function", FunctionDefinition: tool.FunctionDefinition{Name: name, Parameters: map[string]any{"type": "object"}}}, handler)
 	}

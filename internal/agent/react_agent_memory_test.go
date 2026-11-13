@@ -116,7 +116,7 @@ func TestReActAgentUsesMemoryManagerForToolConversation(t *testing.T) {
 	scheduler := &recordingContextCompactionScheduler{}
 	agent := NewReActAgent(
 		client,
-		tool.NewToolRegistry(),
+		newApprovedTestRegistry(),
 		WithCompactionScheduler(scheduler),
 	)
 
@@ -167,7 +167,7 @@ func TestReActAgentUsesInjectedMemoryManager(t *testing.T) {
 
 	agent := NewReActAgent(
 		nil,
-		tool.NewToolRegistry(),
+		newApprovedTestRegistry(),
 		WithMemoryManager(manager),
 	)
 
@@ -188,7 +188,7 @@ func TestReActAgentUsesInjectedMemoryManager(t *testing.T) {
 }
 
 func TestReActAgentClearHistoryClearsManagedContext(t *testing.T) {
-	agent := NewReActAgent(nil, tool.NewToolRegistry())
+	agent := NewReActAgent(nil, newApprovedTestRegistry())
 	if _, err := agent.memoryManager.AddMessage(llm.UserMessage("hello"), ""); err != nil {
 		t.Fatalf("AddMessage() error = %v", err)
 	}
@@ -235,7 +235,7 @@ func TestReActAgentCompactsBeforeEachLLMRequest(t *testing.T) {
 	}}
 	agent := NewReActAgent(
 		client,
-		tool.NewToolRegistry(),
+		newApprovedTestRegistry(),
 		WithCompactionScheduler(scheduler),
 	)
 	var events []Event
@@ -262,7 +262,7 @@ func TestReActAgentStopsWhenCompactionFails(t *testing.T) {
 	scheduler := &recordingContextCompactionScheduler{err: compactionError}
 	agent := NewReActAgent(
 		nil,
-		tool.NewToolRegistry(),
+		newApprovedTestRegistry(),
 		WithCompactionScheduler(scheduler),
 	)
 	_, err := agent.Run(context.Background(), "hello")
@@ -299,7 +299,7 @@ func TestReActAgentMeasuresCompleteRequestAndCalibratesFromPromptUsage(t *testin
 	estimator := &recordingRequestTokenEstimator{next: 7000}
 	agent := NewReActAgent(
 		client,
-		tool.NewToolRegistry(),
+		newApprovedTestRegistry(),
 		WithCompactionScheduler(scheduler),
 		WithRequestTokenEstimator(estimator),
 	)
@@ -349,7 +349,7 @@ func TestReActAgentRecordsEveryProtocolMessageInTranscript(t *testing.T) {
 	transcript := &recordingAgentTranscript{}
 	agent := NewReActAgent(
 		client,
-		tool.NewToolRegistry(),
+		newApprovedTestRegistry(),
 		WithTranscript(transcript, "conversation_1"),
 	)
 

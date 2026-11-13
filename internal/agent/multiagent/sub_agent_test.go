@@ -5,7 +5,6 @@ import (
 	"AgentCLI/internal/llm"
 	"AgentCLI/internal/memory"
 	"AgentCLI/internal/plan"
-	"AgentCLI/internal/tool"
 	"context"
 	"encoding/json"
 	"net/http"
@@ -43,7 +42,7 @@ var _ memory.ContextCompactionScheduler = workerMemoryScheduler{}
 
 func TestNewWorkerSubAgentUsesRoleDefaultPrompt(t *testing.T) {
 	client := &llm.OpenAICompatibleClient{}
-	registry := tool.NewToolRegistry()
+	registry := newApprovedTestRegistry()
 
 	agent, err := NewWorkerSubAgent(client, registry)
 	if err != nil {
@@ -66,7 +65,7 @@ func TestWorkerSubAgentUsesTaskScopedMemory(t *testing.T) {
 
 	worker, err := NewWorkerSubAgent(&llm.OpenAICompatibleClient{
 		APIKey: "test", BaseURL: server.URL, Model: "test", HTTPClient: server.Client(),
-	}, tool.NewToolRegistry())
+	}, newApprovedTestRegistry())
 	if err != nil {
 		t.Fatalf("NewWorkerSubAgent() error = %v", err)
 	}

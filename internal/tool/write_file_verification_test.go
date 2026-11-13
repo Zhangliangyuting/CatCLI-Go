@@ -16,7 +16,7 @@ func TestWriteFileVerification(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	r := NewToolRegistry()
+	r := newApprovedTestRegistry()
 	if err := r.RegisterEnabledTools([]Provider{NewBuiltinProvider(work)}, []string{"write_file"}); err != nil {
 		t.Fatal(err)
 	}
@@ -58,7 +58,7 @@ func TestWriteFileVerification(t *testing.T) {
 		})
 	}
 	// The verifier survives both provider registration paths and role subsets.
-	all := NewToolRegistry()
+	all := newApprovedTestRegistry()
 	all.RegisterProvider(NewBuiltinProvider(work))
 	check, err := all.Subset("write_file").Verify(t.Context(), "write_file", map[string]any{"file_path": "matching", "content": "expected"}, "")
 	if err != nil || check == nil {
@@ -90,7 +90,7 @@ func TestWriteFileVerification(t *testing.T) {
 }
 
 func TestCustomWriteFileDoesNotAcquireBuiltinVerification(t *testing.T) {
-	r := NewToolRegistry()
+	r := newApprovedTestRegistry()
 	r.RegisterTool(WriteFileDefinition(), func(context.Context, map[string]any) (string, error) {
 		t.Fatal("executed during verification")
 		return "", nil

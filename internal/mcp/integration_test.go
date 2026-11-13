@@ -1,7 +1,6 @@
 package mcp
 
 import (
-	"AgentCLI/internal/tool"
 	"bufio"
 	"bytes"
 	"context"
@@ -130,7 +129,7 @@ func TestStreamableHTTPHandshakePaginationSSEAndToolResults(t *testing.T) {
 	if len(statuses) != 1 || statuses[0].Err != nil || statuses[0].Tools != 2 {
 		t.Fatalf("statuses=%+v", statuses)
 	}
-	registry := tool.NewToolRegistry()
+	registry := newApprovedTestRegistry()
 	registry.RegisterProvider(manager)
 	result, err := registry.Execute(context.Background(), "mcp__remote__echo", map[string]any{})
 	if err != nil || !strings.Contains(result, `"type":"image"`) || !strings.Contains(result, `"value":42`) {
@@ -297,7 +296,7 @@ func TestManagerStdioFailureIsolationAndShutdown(t *testing.T) {
 	if len(statuses) != 4 || statuses[0].Err != nil || statuses[1].Err != nil || statuses[2].Err == nil || !errors.Is(statuses[3].Err, context.DeadlineExceeded) {
 		t.Fatalf("statuses=%+v", statuses)
 	}
-	registry := tool.NewToolRegistry()
+	registry := newApprovedTestRegistry()
 	registry.RegisterProvider(manager)
 	var wait sync.WaitGroup
 	for _, name := range []string{"mcp__a__echo", "mcp__b__echo"} {

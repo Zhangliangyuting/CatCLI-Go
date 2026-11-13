@@ -13,7 +13,6 @@ import (
 	"AgentCLI/internal/routing"
 	"AgentCLI/internal/tool"
 	workspacepkg "AgentCLI/internal/workspace"
-	"bufio"
 	"context"
 	"errors"
 	"fmt"
@@ -184,7 +183,8 @@ func main() {
 		return
 	}
 	eventObserver := newConsoleObserver(os.Stdout, cfg.Debug)
-	reader := bufio.NewReader(os.Stdin)
+	reader := cli.NewTerminalReader(os.Stdin)
+	toolRegistry.SetPermissionConfirmer(cli.ToolPermissionConfirmer(reader, os.Stdout))
 
 	plannerSubAgent, err := multiagent.NewPlannerSubAgent(
 		client,

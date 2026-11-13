@@ -186,17 +186,38 @@ func (agent *WorkerSubAgent) executeWorkerTool(
 	ctx context.Context,
 	call llm.ToolCall,
 ) (string, error) {
-	data, result, err := startToolCallRecording(ctx, agent.tools, call)
+	data, result := toolCallRecordingData(ctx, agent.tools, call)
+	var approved *tool.AuthorizedCall
+	if data.ReusedFrom == "" {
+		var args map[string]any
+		if err := json.Unmarshal([]byte(data.Arguments), &args); err != nil {
+			return "ERROR: invalid tool arguments: " + err.Error(), nil
+		}
+		var err error
+		approved, err = agent.tools.Authorize(ctx, data.ToolName, args)
+		if ctx.Err() != nil {
+			return "", ctx.Err()
+		}
+		if err != nil {
+			return "ERROR: " + err.Error(), nil
+		}
+		binding, _ := ctx.Value(toolRecordingKey{}).(taskToolRecording)
+		if binding.run != nil {
+			data.VerificationData, _ = approved.PrepareVerification(ctx)
+		}
+		if err := ctx.Err(); err != nil {
+			return "", err
+		}
+	}
+	data, err := startToolCallRecording(ctx, data)
 	if err != nil {
 		return "", err
 	}
-	var args map[string]any
 	var toolErr error
-	if err := json.Unmarshal([]byte(data.Arguments), &args); err != nil {
-		toolErr = fmt.Errorf("invalid tool arguments: %w", err)
-	} else if data.ReusedFrom == "" {
-		result, toolErr = agent.tools.Execute(ctx, data.ToolName, args)
+	if data.ReusedFrom == "" {
+		result, toolErr = approved.Execute(ctx)
 	}
+
 	if toolErr != nil {
 		result = "ERROR: " + toolErr.Error()
 	}

@@ -2,7 +2,6 @@ package main
 
 import (
 	"AgentCLI/internal/execution"
-	"bufio"
 	"context"
 	"fmt"
 	"io"
@@ -32,7 +31,7 @@ func resumeExecution(ctx context.Context, run execution.RunState, react, plan fu
 	return "", fmt.Errorf("unsupported recovery kind %q", run.Kind)
 }
 
-func promptInterruptedRun(ctx context.Context, store execution.EventStore, conversationID string, runs []execution.RunState, reader *bufio.Reader, output io.Writer, resume func(context.Context, execution.RunState) (string, error)) error {
+func promptInterruptedRun(ctx context.Context, store execution.EventStore, conversationID string, runs []execution.RunState, reader interface{ ReadString(byte) (string, error) }, output io.Writer, resume func(context.Context, execution.RunState) (string, error)) error {
 	if len(runs) == 0 {
 		return nil
 	}

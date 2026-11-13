@@ -44,34 +44,40 @@ func (p BuiltinProvider) Tools() []Tool {
 	return []Tool{
 		{
 			Definition: ListDirDefinition(),
+			Permission: Allow,
 			Handler:    p.pathHandler("path", ListDirHandler),
 			Verify:     verifyFreshRead,
 			ReadOnly:   true,
 		},
 		{
 			Definition: ReadFileDefinition(),
+			Permission: Allow,
 			Handler:    p.pathHandler("path", ReadFileHandler),
 			Verify:     verifyFreshRead,
 			ReadOnly:   true,
 		},
 		{
 			Definition:          EditFileDefinition(),
+			Permission:          Ask,
 			Handler:             p.pathHandler("file_path", EditFileHandler),
 			Verify:              p.verifyEditFile,
 			PrepareVerification: p.prepareEditVerification,
 		},
 		{
 			Definition: WriteFileDefinition(),
+			Permission: Ask,
 			Handler:    p.pathHandler("file_path", WriteFileHandler),
 			Verify:     p.verifyWriteFile,
 		},
 		{
 			Definition: ExecuteCommandDefinition(),
+			Permission: Ask,
 			Handler:    p.commandHandler(),
 			Verify:     verifyCommand,
 		},
 		{
 			Definition: CreateProjectDefinition(),
+			Permission: Ask,
 			Handler:    p.createProjectHandler(),
 			Verify:     p.verifyCreateProject,
 		},
