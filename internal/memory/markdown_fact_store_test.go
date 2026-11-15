@@ -96,7 +96,7 @@ func TestManagerLoadsAndPersistsFacts(t *testing.T) {
 		t.Fatalf("NewMarkdownFactStore() error = %v", err)
 	}
 	if err := store.Upsert(StoredFact{
-		Scope: FactScopeProject, Key: "language", Content: "Use Go.",
+		Scope: FactScopeProject, Key: "language", Content: "Use Go.", NeedsVerification: true,
 	}); err != nil {
 		t.Fatalf("seed project fact error = %v", err)
 	}
@@ -109,6 +109,9 @@ func TestManagerLoadsAndPersistsFacts(t *testing.T) {
 	}
 	if fact, ok := manager.GetFact(FactScopeProject, "language"); !ok || fact.Content() != "Use Go." {
 		t.Fatalf("loaded project fact = (%+v, %v)", fact, ok)
+	}
+	if fact, _ := manager.GetFact(FactScopeProject, "language"); !fact.Metadata().NeedsVerification {
+		t.Fatal("verification flag was not restored from Markdown")
 	}
 	if _, err := manager.UpsertFact(FactScopeUser, "style", "Prefer concise answers.", Metadata{}); err != nil {
 		t.Fatalf("UpsertFact(USER) error = %v", err)
@@ -123,6 +126,9 @@ func TestManagerLoadsAndPersistsFacts(t *testing.T) {
 	}
 	if reloaded.FactLen() != 2 {
 		t.Fatalf("reloaded FactLen() = %d, want 2 persistent facts", reloaded.FactLen())
+	}
+	if fact, _ := reloaded.GetFact(FactScopeProject, "language"); !fact.Metadata().NeedsVerification {
+		t.Fatal("verification flag was not preserved when saving facts")
 	}
 	if _, ok := reloaded.GetFact(FactScopeSession, "task"); ok {
 		t.Fatal("SESSION fact was persisted")

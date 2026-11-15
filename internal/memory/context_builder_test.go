@@ -71,6 +71,33 @@ func TestContextBuilderRetrievesFactsAndOlderActiveTurns(t *testing.T) {
 	}
 }
 
+func TestContextBuilderDoesNotVerifyFactThatDoesNotFitBudget(t *testing.T) {
+	manager := NewManager(nil)
+	fact, err := manager.UpsertFact(FactScopeProject, "toolchain.go.version", "This project uses Go 1.24", Metadata{NeedsVerification: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	verifierCalls := 0
+	manager.SetFactVerifier(func(_ context.Context, entries []Entry) (map[string]FactVerificationResult, error) {
+		verifierCalls++
+		return map[string]FactVerificationResult{fact.ID(): {Outcome: FactVerifiedCurrent}}, nil
+	})
+	builder := NewContextBuilder(manager, NewMemoryRetriever(nil), 1)
+	var report RetrievalReport
+	if _, err := builder.BuildWithReport(context.Background(), "Go version", func(got RetrievalReport) { report = got }); err != nil {
+		t.Fatal(err)
+	}
+	if len(report.FactMatches) == 0 {
+		t.Fatal("test fact was not retrieved")
+	}
+	if verifierCalls != 0 {
+		t.Fatalf("verifier calls = %d, want 0 because the fact cannot fit the context budget", verifierCalls)
+	}
+	if len(report.IncludedFacts) != 0 {
+		t.Fatalf("included facts = %d, want none", len(report.IncludedFacts))
+	}
+}
+
 func TestContextBuilderPreservesRecentToolProtocol(t *testing.T) {
 	manager := NewManager(TokenCounterFunc(func(content string) int { return len([]rune(content)) }))
 	if _, err := manager.UpsertFact(FactScopeUser, "language", "请使用中文", Metadata{}); err != nil {

@@ -45,6 +45,22 @@ func (r *ToolRegistry) IsReadOnly(name string) bool {
 	return ok && t.ReadOnly
 }
 
+// ReadOnlySubset returns only tools explicitly declared read-only. It is used
+// for observation workflows that must not mutate the workspace.
+func (r *ToolRegistry) ReadOnlySubset() *ToolRegistry {
+	subset := NewToolRegistry()
+	if r == nil {
+		return subset
+	}
+	subset.permissions = r.permissions
+	for name, registered := range r.tools {
+		if registered.ReadOnly {
+			subset.tools[name] = registered
+		}
+	}
+	return subset
+}
+
 // Verification confirms a current postcondition or requests a fresh attempt.
 // Retry does not mean that repeating a mutation is safe. Nil is inconclusive.
 type Verification struct {

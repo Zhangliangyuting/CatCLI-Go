@@ -72,9 +72,10 @@ func (extractor *LLMFactExtractor) Extract(
 	}
 
 	type promptFact struct {
-		Scope   FactScope `json:"scope"`
-		Key     string    `json:"key"`
-		Content string    `json:"content"`
+		Scope             FactScope `json:"scope"`
+		Key               string    `json:"key"`
+		Content           string    `json:"content"`
+		NeedsVerification bool      `json:"needs_verification,omitempty"`
 	}
 	facts := make([]promptFact, 0, len(existingFacts))
 	for _, entry := range existingFacts {
@@ -84,6 +85,7 @@ func (extractor *LLMFactExtractor) Extract(
 		metadata := entry.Metadata()
 		facts = append(facts, promptFact{
 			Scope: metadata.FactScope, Key: metadata.FactKey, Content: entry.Content(),
+			NeedsVerification: metadata.NeedsVerification,
 		})
 	}
 	existingJSON, err := json.Marshal(facts)
@@ -97,7 +99,7 @@ func (extractor *LLMFactExtractor) Extract(
 
 	prompt := fmt.Sprintf(`Extract only explicit facts or memory changes stated by the user.
 Return one JSON object with exactly this shape:
-{"operations":[{"action":"UPSERT or REMOVE","scope":"SESSION or PROJECT or USER","key":"stable_lowercase_key","content":"string; omit for REMOVE"}]}
+{"operations":[{"action":"UPSERT or REMOVE","scope":"SESSION or PROJECT or USER","key":"stable_lowercase_key","content":"string; omit for REMOVE","needs_verification":true}]}
 
 Rules:
 - Return {"operations":[]} when the message contains no information worth remembering.
@@ -105,6 +107,8 @@ Rules:
 - PROJECT is a repository-specific convention, technology, command, or decision.
 - USER is a preference that should follow the user across projects.
 - Prefer PROJECT over USER when the statement explicitly says "this project".
+- Set needs_verification to true only for facts that should be checked against the current project or an external source before use (for example, a toolchain version or current deployment configuration). Set it to false for preferences, conventions, and other facts without a clear source of truth.
+- Preserve the value the user stated; never invent source references. A true value means the agent must try to verify the fact with available tools before relying on it; if it cannot verify the fact, it should ask the user or treat it as unconfirmed.
 - Record only what the user explicitly states; do not infer or embellish.
 - Do not store ordinary one-time requests, questions, secrets, credentials, or assistant claims.
 - Reuse the matching existing key for updates and removals.

@@ -20,10 +20,11 @@ func (action FactAction) Valid() bool {
 
 // FactOperation is a validated mutation proposed by a FactExtractor.
 type FactOperation struct {
-	Action  FactAction `json:"action"`
-	Scope   FactScope  `json:"scope"`
-	Key     string     `json:"key"`
-	Content string     `json:"content,omitempty"`
+	Action            FactAction `json:"action"`
+	Scope             FactScope  `json:"scope"`
+	Key               string     `json:"key"`
+	Content           string     `json:"content,omitempty"`
+	NeedsVerification bool       `json:"needs_verification,omitempty"`
 }
 
 var factKeyPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9._:-]{0,127}$`)
@@ -74,7 +75,7 @@ func ApplyFactOperations(manager *Manager, operations []FactOperation) error {
 				operation.Scope,
 				operation.Key,
 				operation.Content,
-				Metadata{},
+				Metadata{NeedsVerification: operation.NeedsVerification},
 			); err != nil {
 				return fmt.Errorf("upsert %s fact %q: %w", operation.Scope, operation.Key, err)
 			}

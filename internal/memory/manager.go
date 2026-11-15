@@ -18,6 +18,7 @@ const MaxFactContentBytes = 4 << 10
 // may still choose which entries to include in a model request.
 type Manager struct {
 	mu           sync.RWMutex
+	verification *factVerificationCache
 	entryBuildMu sync.Mutex
 	entries      []Entry
 	entryIndexes map[string]int
@@ -44,7 +45,9 @@ func NewManagerWithFactStore(tokenCounter TokenCounter, factStore FactStore) (*M
 		return nil, fmt.Errorf("load persistent facts: %w", err)
 	}
 	for _, stored := range storedFacts {
-		entry, err := manager.buildFactEntry(stored.Scope, stored.Key, stored.Content, Metadata{})
+		entry, err := manager.buildFactEntry(stored.Scope, stored.Key, stored.Content, Metadata{
+			NeedsVerification: stored.NeedsVerification,
+		})
 		if err != nil {
 			return nil, fmt.Errorf("restore %s fact %q: %w", stored.Scope, stored.Key, err)
 		}
@@ -64,6 +67,7 @@ func NewManager(tokenCounter TokenCounter) *Manager {
 	return &Manager{
 		entryIndexes: make(map[string]int),
 		facts:        make(map[string]Entry),
+		verification: &factVerificationCache{records: make(map[string]factVerificationRecord)},
 		tokenCounter: tokenCounter,
 		now:          time.Now,
 		newID:        randomID,
@@ -94,13 +98,18 @@ func (m *Manager) UpsertFact(
 		return Entry{}, fmt.Errorf("memory entry %q already exists", factID)
 	}
 	if scope != FactScopeSession && m.factStore != nil {
-		if err := m.factStore.Upsert(StoredFact{Scope: scope, Key: key, Content: content}); err != nil {
+		if err := m.factStore.Upsert(StoredFact{Scope: scope, Key: key, Content: content, NeedsVerification: metadata.NeedsVerification}); err != nil {
 			return Entry{}, fmt.Errorf("persist %s fact %q: %w", scope, key, err)
 		}
 	}
 	if previous, exists := m.facts[factID]; exists {
 		m.factTokens -= previous.TokenCount()
 		m.removeFactFromOrderLocked(factID)
+	}
+	if m.verification != nil {
+		m.verification.mu.Lock()
+		delete(m.verification.records, factID)
+		m.verification.mu.Unlock()
 	}
 	m.facts[factID] = entry
 	m.factOrder = append(m.factOrder, factID)
@@ -569,6 +578,11 @@ func (m *Manager) RemoveFact(scope FactScope, key string) (bool, error) {
 	}
 
 	delete(m.facts, factID)
+	if m.verification != nil {
+		m.verification.mu.Lock()
+		delete(m.verification.records, factID)
+		m.verification.mu.Unlock()
+	}
 	m.factTokens -= entry.TokenCount()
 	m.removeFactFromOrderLocked(factID)
 	return true, nil

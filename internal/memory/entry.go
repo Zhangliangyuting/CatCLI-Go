@@ -77,14 +77,15 @@ func (t Type) Valid() bool {
 // Attributes remains available for memory-specific information that is not
 // part of the chat protocol.
 type Metadata struct {
-	Role       string             `json:"role,omitempty"`
-	ToolName   string             `json:"tool_name,omitempty"`
-	ToolCallID string             `json:"tool_call_id,omitempty"`
-	ToolCalls  []llm.ToolCall     `json:"tool_calls,omitempty"`
-	FactScope  FactScope          `json:"fact_scope,omitempty"`
-	FactKey    string             `json:"fact_key,omitempty"`
-	Compaction CompactionMetadata `json:"compaction,omitempty"`
-	Attributes map[string]string  `json:"attributes,omitempty"`
+	Role              string             `json:"role,omitempty"`
+	ToolName          string             `json:"tool_name,omitempty"`
+	ToolCallID        string             `json:"tool_call_id,omitempty"`
+	ToolCalls         []llm.ToolCall     `json:"tool_calls,omitempty"`
+	FactScope         FactScope          `json:"fact_scope,omitempty"`
+	FactKey           string             `json:"fact_key,omitempty"`
+	NeedsVerification bool               `json:"needs_verification,omitempty"`
+	Compaction        CompactionMetadata `json:"compaction,omitempty"`
+	Attributes        map[string]string  `json:"attributes,omitempty"`
 }
 
 // Entry is an immutable memory value. Metadata is copied on both input and

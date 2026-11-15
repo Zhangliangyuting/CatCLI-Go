@@ -185,6 +185,9 @@ func main() {
 	eventObserver := newConsoleObserver(os.Stdout, cfg.Debug)
 	reader := cli.NewTerminalReader(os.Stdin)
 	toolRegistry.SetPermissionConfirmer(cli.ToolPermissionConfirmer(reader, os.Stdout))
+	rootMemory.Manager.SetFactVerifier(func(ctx context.Context, facts []memory.Entry) (map[string]memory.FactVerificationResult, error) {
+		return agent.VerifyFacts(ctx, client, toolRegistry, facts)
+	})
 
 	plannerSubAgent, err := multiagent.NewPlannerSubAgent(
 		client,

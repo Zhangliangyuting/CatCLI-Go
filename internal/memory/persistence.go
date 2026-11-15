@@ -11,9 +11,10 @@ func NewConversationID() (string, error) {
 // StoredFact is the persistence representation of a project or user fact.
 // Token counts are recalculated by Manager with its configured counter.
 type StoredFact struct {
-	Scope   FactScope
-	Key     string
-	Content string
+	Scope             FactScope
+	Key               string
+	Content           string
+	NeedsVerification bool
 }
 
 // FactStore persists facts that survive the current session. Implementations

@@ -214,6 +214,7 @@ func newTaskMemoryManager(root *Manager) (*Manager, error) {
 		return nil, fmt.Errorf("root memory manager is nil")
 	}
 	taskManager := NewManager(nil)
+	taskManager.verification = root.verification
 	for _, fact := range root.Facts() {
 		if err := taskManager.AddEntry(fact); err != nil {
 			return nil, fmt.Errorf("copy fact %q into task memory: %w", fact.ID(), err)

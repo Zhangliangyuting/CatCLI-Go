@@ -73,12 +73,14 @@ func (b *ContextBuilder) BuildWithReport(ctx context.Context, query string, repo
 
 	facts := b.Manager.Facts()
 	factDocs := make([]MemoryDocument, 0, len(facts))
+	factsByID := make(map[string]Entry, len(facts))
 	for _, entry := range facts {
 		doc := MemoryDocument{
 			ID: entry.ID(), Text: entry.Content(), Kind: Fact,
 			Scope: entry.Metadata().FactScope,
 		}
 		factDocs = append(factDocs, doc)
+		factsByID[entry.ID()] = entry
 	}
 	contextDocs := make([]MemoryDocument, 0, firstRecent)
 	olderOrder := make(map[string]int, firstRecent)
@@ -115,7 +117,7 @@ func (b *ContextBuilder) BuildWithReport(ctx context.Context, query string, repo
 	retrieval := RetrievalReport{Duration: time.Since(started), FactMatches: selectedFacts, ContextMatches: selectedContext}
 
 	used := 0
-	var factText strings.Builder
+	chosenFacts := make([]MemoryDocument, 0, len(selectedFacts))
 	chosenContext := make([]MemoryDocument, 0)
 	include := func(doc MemoryDocument) {
 		cost := b.Manager.tokenCounter.Count(doc.Text) + 8
@@ -124,14 +126,15 @@ func (b *ContextBuilder) BuildWithReport(ctx context.Context, query string, repo
 		}
 		used += cost
 		if doc.Kind == Fact {
-			fmt.Fprintf(&factText, "\n[%s] %s", doc.Scope, doc.Text)
-			retrieval.IncludedFacts = append(retrieval.IncludedFacts, doc)
-			b.Manager.TouchFact(doc.ID)
+			chosenFacts = append(chosenFacts, doc)
 		} else {
 			chosenContext = append(chosenContext, doc)
 			retrieval.IncludedContext = append(retrieval.IncludedContext, doc)
 		}
 	}
+	// First decide what would actually fit in the context. A marked fact that
+	// gets dropped by the token budget is not used, so it should not trigger a
+	// source check.
 	// Give both categories an opportunity to use the shared token budget.
 	for index := 0; index < len(selectedFacts) || index < len(selectedContext); index++ {
 		if index < len(selectedFacts) {
@@ -140,6 +143,47 @@ func (b *ContextBuilder) BuildWithReport(ctx context.Context, query string, repo
 		if index < len(selectedContext) {
 			include(selectedContext[index])
 		}
+	}
+	selectedMarkedFacts := make([]Entry, 0, len(chosenFacts))
+	for _, doc := range chosenFacts {
+		if fact, ok := factsByID[doc.ID]; ok && fact.Metadata().NeedsVerification {
+			selectedMarkedFacts = append(selectedMarkedFacts, fact)
+		}
+	}
+	// Verify only facts that are relevant and fit in this request's context.
+	verificationOutcomes, err := b.Manager.VerifyFactsIfNeeded(ctx, selectedMarkedFacts)
+	if err != nil {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return nil, ctxErr
+		}
+	}
+	var factText strings.Builder
+	for _, doc := range chosenFacts {
+		reservedCost := b.Manager.tokenCounter.Count(doc.Text) + 8
+		fact, ok := factsByID[doc.ID]
+		if ok && fact.Metadata().NeedsVerification {
+			verified := verificationOutcomes[fact.ID()]
+			if verified.Outcome != FactVerifiedCurrent {
+				used -= reservedCost
+				continue
+			}
+			metadata := fact.Metadata()
+			current, exists := b.Manager.GetFact(metadata.FactScope, metadata.FactKey)
+			if !exists || current.Content() != verified.Content {
+				used -= reservedCost
+				continue
+			}
+			doc.Text = verified.Content
+		}
+		used -= reservedCost
+		actualCost := b.Manager.tokenCounter.Count(doc.Text) + 8
+		if used+actualCost > b.MaxRetrievedTokens {
+			continue
+		}
+		used += actualCost
+		fmt.Fprintf(&factText, "\n[%s] %s", doc.Scope, doc.Text)
+		retrieval.IncludedFacts = append(retrieval.IncludedFacts, doc)
+		b.Manager.TouchFact(doc.ID)
 	}
 	sort.SliceStable(chosenContext, func(i, j int) bool {
 		return olderOrder[chosenContext[i].ID] < olderOrder[chosenContext[j].ID]

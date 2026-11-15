@@ -148,6 +148,20 @@ func loadMarkdownFacts(path string, scope FactScope) ([]StoredFact, error) {
 		}
 
 		start := index + 1
+		needsVerification := false
+		if start < len(lines) {
+			if parsed, ok, err := parseFactVerificationMarker(lines[start]); err != nil {
+				return nil, fmt.Errorf("parse %s facts: %w", scope, err)
+			} else if ok {
+				needsVerification = parsed
+				start++
+			} else if _, legacy, err := parseLegacyFactAuthorityMarker(lines[start]); err != nil {
+				return nil, fmt.Errorf("parse %s facts: %w", scope, err)
+			} else if legacy {
+				needsVerification = true
+				start++
+			}
+		}
 		end := start
 		for end < len(lines) && strings.TrimSpace(lines[end]) != factEndMarker {
 			end++
@@ -156,7 +170,7 @@ func loadMarkdownFacts(path string, scope FactScope) ([]StoredFact, error) {
 			return nil, fmt.Errorf("parse %s facts: fact %q has no end marker", scope, key)
 		}
 		content := strings.TrimSpace(strings.Join(lines[start:end], "\n"))
-		fact := StoredFact{Scope: scope, Key: key, Content: content}
+		fact := StoredFact{Scope: scope, Key: key, Content: content, NeedsVerification: needsVerification}
 		if err := validateStoredFact(fact); err != nil {
 			return nil, fmt.Errorf("parse %s facts: %w", scope, err)
 		}
@@ -177,6 +191,10 @@ func writeMarkdownFacts(path string, scope FactScope, facts []StoredFact) error 
 		output.WriteString("\n")
 		output.WriteString(factStartMarker(fact.Key))
 		output.WriteString("\n")
+		if fact.NeedsVerification {
+			output.WriteString(factVerificationMarker())
+			output.WriteString("\n")
+		}
 		output.WriteString(strings.TrimSpace(fact.Content))
 		output.WriteString("\n")
 		output.WriteString(factEndMarker)
@@ -226,6 +244,35 @@ func validateStoredFact(fact StoredFact) error {
 func factStartMarker(key string) string {
 	encoded := base64.RawURLEncoding.EncodeToString([]byte(key))
 	return "<!-- catcli-fact:" + encoded + " -->"
+}
+
+func factVerificationMarker() string {
+	return "<!-- catcli-verify-before-use -->"
+}
+
+func parseFactVerificationMarker(line string) (bool, bool, error) {
+	if strings.TrimSpace(line) == factVerificationMarker() {
+		return true, true, nil
+	}
+	return false, false, nil
+}
+
+func parseLegacyFactAuthorityMarker(line string) (string, bool, error) {
+	line = strings.TrimSpace(line)
+	const prefix = "<!-- catcli-authority:"
+	const suffix = " -->"
+	if !strings.HasPrefix(line, prefix) || !strings.HasSuffix(line, suffix) {
+		return "", false, nil
+	}
+	encoded := strings.TrimSuffix(strings.TrimPrefix(line, prefix), suffix)
+	decoded, err := base64.RawURLEncoding.DecodeString(encoded)
+	if err != nil {
+		return "", true, fmt.Errorf("invalid legacy fact authority marker: %w", err)
+	}
+	if len(decoded) == 0 {
+		return "", true, fmt.Errorf("legacy fact authority marker is empty")
+	}
+	return string(decoded), true, nil
 }
 
 func parseFactStartMarker(line string) (string, bool, error) {
